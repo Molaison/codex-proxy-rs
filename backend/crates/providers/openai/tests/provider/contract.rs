@@ -7981,7 +7981,7 @@ async fn capacity_http_and_websocket_opening_rejections_use_bounded_business_ret
             assert!(
                 matches!(error.pre_delivery_retry(), Some(PreDeliveryRetry::SameAccountTransientRetry {
                 max_retries, initial_delay, max_delay,
-            }) if max_retries.get() == 3 && initial_delay == Duration::from_secs(8) && max_delay == Duration::from_secs(8))
+            }) if max_retries.get() == 8 && initial_delay == Duration::from_secs(60) && max_delay == Duration::from_secs(60))
             );
             assert!(provider_openai::openai_failure_affects_account_score(
                 &error

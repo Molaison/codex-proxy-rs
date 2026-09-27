@@ -16,6 +16,11 @@ const OPENAI_ACCOUNT_SCORE_FAILURE_REASONS: &[&str] = &[
     "service_unavailable_error",
 ];
 
+// 429/容量拒绝通常是短时窗口，而不是凭据失效。请求内多等一会儿，
+// 避免客户端只看到 "exceeded retry limit" 就中断对话。
+const CAPACITY_TRANSIENT_MAX_RETRIES: u32 = 8;
+const CAPACITY_TRANSIENT_MAX_DELAY: Duration = Duration::from_secs(60);
+
 fn is_openai_account_score_failure_reason(value: &str) -> bool {
     let value = value.trim();
     OPENAI_ACCOUNT_SCORE_FAILURE_REASONS
@@ -1373,9 +1378,9 @@ pub(super) fn map_upstream_failure(
         error = error.with_retry_after(retry_after);
     }
     if capacity_unavailable && error.replay_is_safe() {
-        let max_delay = Duration::from_secs(8);
+        let max_delay = CAPACITY_TRANSIENT_MAX_DELAY;
         error = error.with_transient_retry(
-            NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN),
+            NonZeroU32::new(CAPACITY_TRANSIENT_MAX_RETRIES).unwrap_or(NonZeroU32::MIN),
             failure
                 .retry_after_seconds
                 .map_or(Duration::from_millis(500), Duration::from_secs)

@@ -4174,6 +4174,23 @@ fn cancelled_waiter_releases_its_place_and_new_requests_do_not_overtake_fifo() {
 }
 
 #[test]
+fn rpm_rejection_waits_for_a_slot_when_the_client_queue_is_enabled() {
+    use futures::FutureExt;
+    block_on(async {
+        let (service, admissions) = queue_service(1, 1, Duration::from_secs(1));
+        admissions.rpm_exhausted.store(true, Ordering::SeqCst);
+        let mut pending = service.start(request(&service, ClientTransport::HttpJson));
+        assert!(pending.as_mut().now_or_never().is_none());
+        futures_timer::Delay::new(Duration::from_millis(150)).await;
+        assert_eq!(admissions.granted.load(Ordering::SeqCst), 0);
+        admissions.rpm_exhausted.store(false, Ordering::SeqCst);
+        let started = pending.await.expect("RPM waiter should be admitted");
+        assert_eq!(admissions.granted.load(Ordering::SeqCst), 1);
+        drop(started);
+    });
+}
+
+#[test]
 fn queue_timeout_and_rpm_rejection_leave_no_new_admission() {
     block_on(async {
         let (service, admissions) = queue_service(1, 1, Duration::from_millis(20));
@@ -4193,7 +4210,7 @@ fn queue_timeout_and_rpm_rejection_leave_no_new_admission() {
             .await
             .err()
             .unwrap();
-        assert_eq!(limited.kind(), GatewayErrorKind::RateLimited);
+        assert_eq!(limited.kind(), GatewayErrorKind::ConcurrencyQueueTimeout);
         assert_eq!(admissions.granted.load(Ordering::SeqCst), 1);
         drop(running);
     });

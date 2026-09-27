@@ -1807,10 +1807,24 @@ impl DefaultExecutionService {
                 }
                 ClientAdmissionDecision::Rejected(reason) => {
                     admission.armed = false;
-                    if reason == ClientAdmissionRejection::RateLimited || policy.max_waiting == 0 {
+                    // RPM exhaustion is a temporary admission condition. When a
+                    // queue is configured, put the request behind the same FIFO
+                    // used for concurrency saturation so the client does not
+                    // immediately turn a recoverable window into a 429/retry
+                    // storm. A zero-sized queue keeps the existing fail-fast
+                    // contract for deployments that explicitly disable waiting.
+                    if policy.max_waiting == 0 {
                         return Err(GatewayError::new(
-                            GatewayErrorKind::RateLimited,
-                            "request exceeds client API key limits",
+                            if reason == ClientAdmissionRejection::RateLimited {
+                                GatewayErrorKind::RateLimited
+                            } else {
+                                GatewayErrorKind::ConcurrencyQueueFull
+                            },
+                            if reason == ClientAdmissionRejection::RateLimited {
+                                "request exceeds client API key limits"
+                            } else {
+                                "concurrency wait queue is disabled"
+                            },
                         ));
                     }
                     if waiting.elapsed().is_zero()
