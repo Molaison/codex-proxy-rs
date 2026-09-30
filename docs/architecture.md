@@ -561,7 +561,8 @@ Admin 的手动重置复用同一账本与 Key 行锁，在一个事务中清零
 插件预算回调通过 `PluginClientKeyAccess` 进入同一 `ClientKeyService` 和 `ClientKeyStore`，存储事务先复核插件实例版本，
 再执行原生预算操作；不建立另一份预算状态。查询复用账本投影，不触发准入。局部更新金额上限不改用量或窗口，
 仅在值变化时提交配置 revision、审计并发布；重置仍不推进配置版本。重复调用及结果未知的合同见
-[SDK 预算接口](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#client-key-预算)
+[SDK 预算接口](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#client-key-预算)。插件的外部周期和截止时间属于插件私有状态，展示在插件页面；
+宿主预算接口和管理页面只表达原生窗口事实，不为插件周期修改滚动规则或重置语义
 
 - 日窗口按北京时间零点划分；七天窗口从首次准入当天零点开始，到期后由下一次使用重新开启，不固定为周一
 - 金额优先使用 Provider 上报的 USD，否则按现有模型价格估算；订阅账号的估算费用不代表上游订阅账单。
@@ -849,7 +850,8 @@ RUST_MIN_STACK=16777216 cargo +1.97.0 test --manifest-path backend/Cargo.toml --
 其他检查与界面验证按 [贡献与审查](../CONTRIBUTING.md#验证) 执行
 
 插件 Runtime 的真实子进程与持久化测试使用 `CPR_PLUGIN_TEST_DATABASE_URL` 和
-`CPR_PLUGIN_TEST_REDIS_URL` 指向专用实例，密码及隔离要求与上述 Store 测试一致。
+`CPR_PLUGIN_TEST_REDIS_URL` 指向专用实例；未提供插件专用变量时复用 `CPR_TEST_DATABASE_URL` 与 `CPR_TEST_REDIS_URL`。
+密码及隔离要求与上述 Store 测试一致，CI 缺少服务配置时直接失败。
 设置 `CPR_PLUGIN_TEST_LIVE_HTTP=1` 会额外请求 GitHub 公共 HTTPS API，验证受管出站链路；这不代表模型推理验收。
 若测试环境使用 Fake-IP 或私网 DNS，需通过 `CPR_PLUGIN_TEST_LIVE_NETWORK_RANGES` 显式提供逗号分隔的
 CIDR 授权。该选项只用于真实网络测试，默认为空，不改变生产网络策略或其他测试的授权
