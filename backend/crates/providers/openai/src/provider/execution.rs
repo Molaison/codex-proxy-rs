@@ -1102,6 +1102,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 yield ProviderEvent::observation(observation);
             }
             if let Some((mut failure, atomic_upstream_failure)) = terminal_failure {
+                mark_encrypted_replay_rejection(
+                    &failure,
+                    session_affinity_key.as_ref(),
+                    &session_transport_recovery,
+                    context.request_id().as_str(),
+                );
                 let failure_after_commit =
                     timing_signals.semantic_output || pre_commit_events.is_committed();
                 if failure_after_commit {
@@ -1233,6 +1239,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             yield ProviderEvent::observation(observation);
         }
         if let Some((mut failure, atomic_upstream_failure)) = terminal_failure {
+            mark_encrypted_replay_rejection(
+                &failure,
+                session_affinity_key.as_ref(),
+                &session_transport_recovery,
+                context.request_id().as_str(),
+            );
             let failure_after_commit =
                 timing_signals.semantic_output || pre_commit_events.is_committed();
             if failure_after_commit {
