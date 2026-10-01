@@ -7,6 +7,7 @@ import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import { computed, shallowRef, watch } from 'vue'
 import { useAccountResetCredits } from '../../composables/useAccountResetCredits'
+import AccountQuotaCredits from './Credits.vue'
 import UsageLimits from './UsageLimits.vue'
 
 const props = defineProps<{
@@ -118,7 +119,7 @@ function handleRequestConsume(creditId: string) {
     :title="triggerLabel"
     @click="panelOpen = true"
   >
-    <TicketCheck class="size-4 shrink-0" />
+    <TicketCheck class="size-3.5 shrink-0" />
     <span v-if="showTriggerCount" class="translate-y-px font-mono text-[10px] leading-none font-heavy tabular-nums">
       x{{ availableCount }}
     </span>
@@ -247,6 +248,8 @@ function handleRequestConsume(creditId: string) {
           />
         </div>
       </section>
+
+      <AccountQuotaCredits :credits="account.quota.credits" />
     </div>
 
     <template v-if="showConfirm || showCountOnlyAction" #footer>

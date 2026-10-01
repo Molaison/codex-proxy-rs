@@ -397,6 +397,16 @@ pub struct AccountQuotaView {
     pub rate_limit_reason: Option<String>,
     pub recovery_probe_required: bool,
     pub windows: Vec<AccountQuotaWindowView>,
+    pub credits: Option<AccountQuotaCreditsView>,
+}
+
+/// 上游点数安全视图，不透出额度响应中的其他 Provider 字段。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountQuotaCreditsView {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
 }
 
 /// 一个 quota 时间窗口。

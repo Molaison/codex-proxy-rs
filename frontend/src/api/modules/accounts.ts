@@ -28,6 +28,12 @@ export interface AccountQuotaWindow {
   resetAtDisplay: string
 }
 
+export interface AccountQuotaCredits {
+  hasCredits: boolean
+  unlimited: boolean
+  balance: string | null
+}
+
 export interface AccountQuota {
   refreshedAtDisplay: string
   limitReached: boolean
@@ -36,6 +42,7 @@ export interface AccountQuota {
   rateLimitReason: 'upstream_rate_limit' | 'capacity_freeze' | null
   recoveryProbeRequired: boolean
   windows: AccountQuotaWindow[]
+  credits: AccountQuotaCredits | null
 }
 
 export interface AccountCurrencyCost {

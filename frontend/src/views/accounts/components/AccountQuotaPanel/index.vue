@@ -48,7 +48,7 @@ watch(hasPersonalInfo, (available) => {
           v-if="account.capabilities.quota || quotaEntries.length > 0"
           class="m-0 mt-1 flex min-w-0 items-center gap-1.5 text-cp-xs font-emphasis text-cp-text-secondary"
         >
-          <span>{{ formatProviderLabel(account.provider) }} 额度</span>
+          <span>{{ account.provider === 'openai' ? 'Codex' : formatProviderLabel(account.provider) }} 额度</span>
           <template v-if="account.planType">
             <span>·</span>
             <AccountPlanBadge :plan-type="account.planType" :plan-type-display="account.planTypeDisplay" size="sm" />
@@ -57,7 +57,7 @@ watch(hasPersonalInfo, (available) => {
           <span>最近刷新: {{ account.quota.refreshedAtDisplay }}</span>
         </p>
       </div>
-      <div v-if="hasActions" class="flex shrink-0 items-center gap-0.5">
+      <div v-if="hasActions" class="flex shrink-0 items-center gap-0.5 [&_svg]:size-3.5 [&_svg]:stroke-2">
         <BaseIconButton
           v-if="hasPersonalInfo"
           label="查看个人信息"
@@ -82,7 +82,7 @@ watch(hasPersonalInfo, (available) => {
           :pressed="forecastOpen"
           @click="forecastOpen = true"
         >
-          <ChartNoAxesCombined class="size-3.5" :stroke-width="1.75" />
+          <ChartNoAxesCombined class="size-3.5" />
         </BaseIconButton>
         <BaseIconButton
           v-if="account.capabilities.quotaRefresh"
