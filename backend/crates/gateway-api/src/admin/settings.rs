@@ -73,6 +73,7 @@ pub struct RuntimeSettingsView {
     pub account_warmup_schedule_time: String,
     pub account_warmup_model: Option<String>,
     pub updated_at: DateTime<Utc>,
+    pub updated_at_display: String,
 }
 
 /// 原子替换全局运行参数的请求。
@@ -260,8 +261,8 @@ impl UpdateRuntimeSettingsRequest {
     }
 }
 
-impl From<RuntimeSettings> for RuntimeSettingsView {
-    fn from(settings: RuntimeSettings) -> Self {
+impl From<(RuntimeSettings, crate::time::TimePresenter)> for RuntimeSettingsView {
+    fn from((settings, time): (RuntimeSettings, crate::time::TimePresenter)) -> Self {
         let provider_request_profiles = settings
             .request_profiles
             .into_iter()
@@ -302,6 +303,7 @@ impl From<RuntimeSettings> for RuntimeSettingsView {
             account_warmup_enabled: settings.account_warmup_enabled,
             account_warmup_schedule_time: settings.account_warmup_schedule_time,
             account_warmup_model: settings.account_warmup_model,
+            updated_at_display: time.datetime(&settings.updated_at),
             updated_at: settings.updated_at,
         }
     }
@@ -351,10 +353,11 @@ struct ClientDownloadPackageView {
     size_bytes: Option<u64>,
     download_url: String,
     expires_at: Option<DateTime<Utc>>,
+    expires_at_display: Option<String>,
 }
 
-impl From<ClientDownloadPackage> for ClientDownloadPackageView {
-    fn from(package: ClientDownloadPackage) -> Self {
+impl From<(ClientDownloadPackage, crate::time::TimePresenter)> for ClientDownloadPackageView {
+    fn from((package, time): (ClientDownloadPackage, crate::time::TimePresenter)) -> Self {
         Self {
             architecture: package.architecture.as_str().to_owned(),
             source: package.source.as_str().to_owned(),
@@ -362,6 +365,10 @@ impl From<ClientDownloadPackage> for ClientDownloadPackageView {
             file_name: package.file_name,
             size_bytes: package.size_bytes,
             download_url: package.download_url,
+            expires_at_display: package
+                .expires_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
             expires_at: package.expires_at,
         }
     }
@@ -371,18 +378,26 @@ impl From<ClientDownloadPackage> for ClientDownloadPackageView {
 #[serde(rename_all = "camelCase")]
 struct CodexDesktopWindowsDownloadsView {
     resolved_at: DateTime<Utc>,
+    resolved_at_display: String,
     cached: bool,
     warning: Option<String>,
     packages: Vec<ClientDownloadPackageView>,
 }
 
-impl From<CodexDesktopWindowsDownloads> for CodexDesktopWindowsDownloadsView {
-    fn from(downloads: CodexDesktopWindowsDownloads) -> Self {
+impl From<(CodexDesktopWindowsDownloads, crate::time::TimePresenter)>
+    for CodexDesktopWindowsDownloadsView
+{
+    fn from((downloads, time): (CodexDesktopWindowsDownloads, crate::time::TimePresenter)) -> Self {
         Self {
+            resolved_at_display: time.datetime(&downloads.resolved_at),
             resolved_at: downloads.resolved_at,
             cached: downloads.cached,
             warning: downloads.warning,
-            packages: downloads.packages.into_iter().map(Into::into).collect(),
+            packages: downloads
+                .packages
+                .into_iter()
+                .map(|value| ClientDownloadPackageView::from((value, time)))
+                .collect(),
         }
     }
 }
@@ -447,6 +462,7 @@ async fn codex_desktop_windows_downloads<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let downloads = state
         .admin_services()
         .client_distribution()
@@ -454,7 +470,7 @@ where
         .await;
     AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(CodexDesktopWindowsDownloadsView::from(downloads)),
+        AdminEnvelope::ok(CodexDesktopWindowsDownloadsView::from((downloads, time))),
     )
 }
 
@@ -498,6 +514,7 @@ where
         AdminEnvelope::ok(serde_json::json!({
             "defaults": pricing.defaults, "overrides": pricing.overrides,
             "synced": pricing.synced, "syncedAt": pricing.synced_at,
+            "syncedAtDisplay": pricing.synced_at.as_ref().map(|value| crate::time::TimePresenter::new(state.admin_services().timezone()).datetime(value)),
         })),
     ))
 }
@@ -584,6 +601,7 @@ async fn settings<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let result = state
         .admin_services()
         .settings()
@@ -592,7 +610,7 @@ where
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(RuntimeSettingsView::from(result)),
+        AdminEnvelope::ok(RuntimeSettingsView::from((result, time))),
     ))
 }
 
@@ -604,6 +622,7 @@ async fn update_settings<S>(
 where
     S: SessionState + Send + Sync,
 {
+    let time = crate::time::TimePresenter::new(state.admin_services().timezone());
     let command = request.into_command().map_err(map_wire_error)?;
     let result = state
         .admin_services()
@@ -613,7 +632,7 @@ where
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(RuntimeSettingsView::from(result)),
+        AdminEnvelope::ok(RuntimeSettingsView::from((result, time))),
     ))
 }
 
@@ -835,7 +854,10 @@ where
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(result.into_inner()),
+        AdminEnvelope::ok(client_profile_preview_view(
+            result.into_inner(),
+            crate::time::TimePresenter::new(state.admin_services().timezone()),
+        )),
     ))
 }
 
@@ -865,6 +887,23 @@ where
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(result.into_inner()),
+        AdminEnvelope::ok(client_profile_preview_view(
+            result.into_inner(),
+            crate::time::TimePresenter::new(state.admin_services().timezone()),
+        )),
     ))
+}
+
+fn client_profile_preview_view(
+    mut profile: serde_json::Map<String, serde_json::Value>,
+    time: crate::time::TimePresenter,
+) -> serde_json::Map<String, serde_json::Value> {
+    for (raw, display) in [
+        ("verifiedAt", "verifiedAtDisplay"),
+        ("checkedAt", "checkedAtDisplay"),
+    ] {
+        let value = time.rfc_display(profile.get(raw).and_then(serde_json::Value::as_str));
+        profile.insert(display.to_owned(), serde_json::json!(value));
+    }
+    profile
 }

@@ -15,7 +15,6 @@ import KeyUsageSummary from './components/KeyUsageSummary.vue'
 import KeyUsageTrend from './components/KeyUsageTrend.vue'
 import { useKeyConfig } from './composables/useKeyConfig'
 import { useKeyUsage } from './composables/useKeyUsage'
-import { keyUsageTime } from './utils/format'
 
 const { period, model, kind, refreshInterval, overview, overviewLoading, overviewError, refreshing, recordsStale, records, refresh, changePageSize, changePage } = useKeyUsage()
 const { items, currentPage, pageSize, total, loading: recordsLoading, error: recordsError } = records
@@ -49,7 +48,7 @@ async function openAbout() {
         <div class="flex flex-col gap-2">
           <KeyUsageHeader v-model:period="period" v-model:refresh-interval="refreshInterval" :name="overview?.key.name" :prefix="overview?.key.prefix" :refreshing="refreshing || overviewLoading" :configuring="configuring" @refresh="refresh" @configure="openConfig" @open-about="openAbout" />
           <div class="flex flex-wrap items-center justify-between gap-3">
-            <span v-if="overview" class="text-cp-sm text-cp-text-tertiary">更新于 {{ keyUsageTime(overview.asOf).slice(11) }}</span>
+            <span v-if="overview" class="text-cp-sm text-cp-text-tertiary">更新于 {{ overview.asOfDisplay }}</span>
             <BaseInput v-model="model" class="ml-auto w-60 max-w-full" placeholder="输入完整模型名称" aria-label="筛选统计和日志的模型" :maxlength="128">
               <template #prefix>
                 <Search class="size-4" />

@@ -374,7 +374,15 @@ fn config_loader_should_report_startup_configuration_diagnostics() {
         gateway_host::load_config::<GatewayConfig>().expect("startup configuration");
         return;
     }
-    for case in ["normal", "unused", "missing"] {
+    for case in [
+        "normal",
+        "unused",
+        "missing",
+        "timezoneEmpty",
+        "timezoneInvalid",
+        "timezoneNull",
+        "timezoneType",
+    ] {
         let mut document = valid_config_document();
         if case == "unused" {
             document["openai"]["wire_profile"]["location"] = serde_json::json!(UNUSED_SECRET);
@@ -383,6 +391,14 @@ fn config_loader_should_report_startup_configuration_diagnostics() {
                 .as_object_mut()
                 .unwrap()
                 .remove("port");
+        }
+        if case.starts_with("timezone") {
+            document["host"]["timezone"] = match case {
+                "timezoneEmpty" => serde_json::json!(""),
+                "timezoneInvalid" => serde_json::json!(UNUSED_SECRET),
+                "timezoneNull" => serde_json::json!(null),
+                _ => serde_json::json!(8),
+            };
         }
         let directory = tempfile::tempdir().unwrap();
         fs::create_dir(directory.path().join("deploy")).unwrap();
@@ -404,7 +420,7 @@ fn config_loader_should_report_startup_configuration_diagnostics() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             output.status.success(),
-            case != "missing",
+            case != "missing" && !case.starts_with("timezone"),
             "{case}: {stderr}"
         );
         match case {
@@ -413,6 +429,9 @@ fn config_loader_should_report_startup_configuration_diagnostics() {
                 "{stderr}"
             ),
             "missing" => assert!(stderr.contains("host.listen.port"), "{stderr}"),
+            case if case.starts_with("timezone") => {
+                assert!(stderr.contains("host.timezone"), "{stderr}")
+            }
             _ => assert!(!stderr.contains("警告"), "{stderr}"),
         }
         assert!(!stderr.contains(UNUSED_SECRET), "{stderr}");
@@ -579,4 +598,19 @@ fn parse_config(config: &str) -> Result<(GatewayConfig, tempfile::TempDir), Stri
         .resolve_and_validate(&deploy)
         .map_err(|error| error.to_string())?;
     Ok((config, directory))
+}
+
+#[test]
+fn deployment_timezone_defaults_and_valid_override_are_loaded() {
+    let mut document = valid_config_document();
+    document["host"].as_object_mut().unwrap().remove("timezone");
+    let (_config, _directory) = parse_config(&document.to_string()).unwrap();
+    let host: gateway_host::config::HostConfig =
+        serde_json::from_value(document["host"].clone()).unwrap();
+    assert_eq!(host.timezone.name(), "Asia/Shanghai");
+    document["host"]["timezone"] = serde_json::json!("Asia/Kathmandu");
+    let (_config, _directory) = parse_config(&document.to_string()).unwrap();
+    let host: gateway_host::config::HostConfig =
+        serde_json::from_value(document["host"].clone()).unwrap();
+    assert_eq!(host.timezone.name(), "Asia/Kathmandu");
 }

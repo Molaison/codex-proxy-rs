@@ -104,6 +104,8 @@ async fn launch(
         openai,
     } = config;
 
+    let timezone = host.timezone;
+    let store = store.with_timezone(timezone);
     let plugin_cache = host.runtime_data_dir().join("plugins");
     let host = if command.is_some() {
         gateway_host::initialize_command_line(host).await?
@@ -141,7 +143,8 @@ async fn launch(
         });
     }
     let provider_ports = store.provider_ports();
-    let mut openai = provider_openai::initialize(openai, provider_ports.clone()).await?;
+    let mut openai =
+        provider_openai::initialize(openai.with_timezone(timezone), provider_ports.clone()).await?;
     host.report_startup_ready("OpenAI Provider");
     let mut xai = provider_xai::initialize(provider_ports).await?;
     host.report_startup_ready("xAI Provider");
@@ -294,6 +297,7 @@ async fn launch(
             client,
             store.admin_ports(),
             gateway_admin::AdminRuntimePorts {
+                timezone,
                 service_middleware: {
                     let snapshots = core.snapshots();
                     let middleware = plugin_runtime.middleware_registry();

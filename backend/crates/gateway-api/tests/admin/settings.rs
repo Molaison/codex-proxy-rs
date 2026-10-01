@@ -244,7 +244,11 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             .expect("timestamp"),
     };
 
-    let value = serde_json::to_value(RuntimeSettingsView::from(settings)).expect("serialize view");
+    let value = serde_json::to_value(RuntimeSettingsView::from((
+        settings,
+        gateway_api::TimePresenter::new(Default::default()),
+    )))
+    .expect("serialize view");
     assert_eq!(
         value,
         json!({
@@ -284,7 +288,8 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
                 "accountWarmupEnabled": false,
                 "accountWarmupScheduleTime": "08:00",
                 "accountWarmupModel": null,
-                "updatedAt": "2026-08-02T10:30:00Z"
+                "updatedAt": "2026-08-02T10:30:00Z",
+                "updatedAtDisplay": "2026-08-02 18:30:00"
         })
     );
 }
@@ -354,19 +359,22 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         updated_at: chrono::Utc::now(),
     };
 
-    let response_fields: BTreeSet<String> =
-        serde_json::to_value(RuntimeSettingsView::from(settings))
-            .expect("serialize view")
-            .as_object()
-            .expect("view object")
-            .keys()
-            .cloned()
-            .collect();
+    let response_fields: BTreeSet<String> = serde_json::to_value(RuntimeSettingsView::from((
+        settings,
+        gateway_api::TimePresenter::new(Default::default()),
+    )))
+    .expect("serialize view")
+    .as_object()
+    .expect("view object")
+    .keys()
+    .cloned()
+    .collect();
     let mut expected_fields = request_fields;
     expected_fields.insert("providerRequestProfiles".to_owned());
     expected_fields.insert("openaiClientProfile".to_owned());
     expected_fields.insert("xaiClientProfile".to_owned());
     expected_fields.insert("updatedAt".to_owned());
+    expected_fields.insert("updatedAtDisplay".to_owned());
     expected_fields.insert("smartSchedulingDefaults".to_owned());
 
     assert_eq!(response_fields, expected_fields);

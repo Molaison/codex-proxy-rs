@@ -7,7 +7,7 @@ import { errorMessage } from '@/utils/operation'
 import { pricingProviders, pricingRows } from './model'
 
 export function usePricing() {
-  const catalog = shallowRef<PricingCatalog>({ defaults: {}, overrides: {}, synced: {}, syncedAt: null })
+  const catalog = shallowRef<PricingCatalog>({ defaults: {}, overrides: {}, synced: {}, syncedAt: null, syncedAtDisplay: null })
   const provider = ref('openai')
   const search = ref('')
   const source = ref('all')

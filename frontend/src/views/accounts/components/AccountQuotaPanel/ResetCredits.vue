@@ -3,8 +3,6 @@ import type { Account, AccountResetCredit } from '@/api'
 import { BaseButton, BaseEmpty, BaseIconButton, BaseModal } from '@codex-proxy/ui'
 
 import { AlertTriangle, RefreshCw, TicketCheck } from '@lucide/vue'
-import dayjs from 'dayjs'
-import utc from 'dayjs/plugin/utc'
 import { computed, shallowRef, watch } from 'vue'
 import { useAccountResetCredits } from '../../composables/useAccountResetCredits'
 import AccountQuotaCredits from './Credits.vue'
@@ -17,8 +15,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   consumed: [accountId: string]
 }>()
-
-dayjs.extend(utc)
 
 const panelOpen = shallowRef(false)
 const {
@@ -69,7 +65,7 @@ const confirmCreditTitle = computed(() => consumptionCredit.value
 const creditItems = computed(() => availableCredits.value.map(credit => ({
   id: credit.id,
   title: creditTitle(credit),
-  expiry: expiryLabel(credit.expiresAt),
+  expiry: credit.expiresAtDisplay ? `将于 ${credit.expiresAtDisplay} 到期` : '有效期由上游决定',
 })))
 const showCountOnlyAction = computed(() => !loadError.value
   && hasSnapshot.value
@@ -89,13 +85,6 @@ watch(panelOpen, (isOpen) => {
   if (showConfirm.value)
     cancelConsume()
 })
-
-function expiryLabel(value: string | null) {
-  if (!value)
-    return '有效期由上游决定'
-  const expiry = dayjs(value)
-  return expiry.isValid() ? `将于 ${expiry.utcOffset(8).format('YYYY-MM-DD HH:mm')} 到期` : '到期时间未知'
-}
 
 function creditTitle(credit: AccountResetCredit | undefined) {
   return credit?.title?.trim() || '用量重置'
@@ -144,7 +133,7 @@ function handleRequestConsume(creditId: string) {
           v-if="consumptionCredit"
           class="mt-1 mb-0 font-mono text-[10px] leading-normal font-emphasis text-cp-text-quaternary"
         >
-          {{ expiryLabel(consumptionCredit.expiresAt) }}
+          {{ consumptionCredit.expiresAtDisplay ? `将于 ${consumptionCredit.expiresAtDisplay} 到期` : '有效期由上游决定' }}
         </p>
       </section>
     </div>

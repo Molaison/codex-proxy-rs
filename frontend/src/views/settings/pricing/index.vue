@@ -53,7 +53,7 @@ async function deleteModel() {
       :disabled="disabled"
       :saving="saving"
       :syncing="syncing"
-      :synced-at="catalog.syncedAt"
+      :synced-at-display="catalog.syncedAtDisplay"
       :providers="providers"
       @add="edit()"
       @sync="startSync"

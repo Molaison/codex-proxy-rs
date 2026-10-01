@@ -184,7 +184,7 @@ watch(
               <ApiKeyStatusBadge :api-key="row" />
             </template>
             <template #lastUsedAt="{ row }">
-              <LastUsedAtCell :value="row.lastUsedAt" />
+              <LastUsedAtCell :value="row.lastUsedAt" :display="row.lastUsedAtDisplay" :full-display="row.lastUsedAtFullDisplay" />
             </template>
             <template #actions="{ row }">
               <ApiKeyActions

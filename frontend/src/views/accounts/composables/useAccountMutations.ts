@@ -2,7 +2,6 @@ import type { Ref } from 'vue'
 import type { AccountImportTask, getAccounts } from '@/api'
 import type { RequestOptions } from '@/api/request'
 import { toast } from '@codex-proxy/ui'
-import dayjs from 'dayjs'
 import { computed, ref, shallowReactive, watch } from 'vue'
 import {
   batchUpdateAccounts,
@@ -162,7 +161,7 @@ export function useAccountMutations(options: {
           accountIds: selected.join(','),
           confirm: 'export_sensitive_accounts',
         })
-        const fileName = `cpr-accounts-selected-${selected.length}-${dayjs().format('YYYY-MM-DD')}.json`
+        const fileName = payload.fileName
         await downloadJson(payload, fileName)
         toast.success(`已导出 ${selected.length} 个账号`)
       },

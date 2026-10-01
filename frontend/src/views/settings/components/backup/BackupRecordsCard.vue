@@ -3,7 +3,6 @@ import type { BackupRecord } from '@/api'
 
 import { BaseButton, BaseCard, BaseConfirmModal, BaseIconButton, BaseTable, BaseTablePagination, defineTableColumns } from '@codex-proxy/ui'
 import { Download, Play, RefreshCw, Trash2 } from '@lucide/vue'
-import { formatDateTime } from '@/utils/format'
 
 import BackupStatusBadge from './BackupStatusBadge.vue'
 
@@ -146,7 +145,7 @@ function canDelete(record: BackupRecord): boolean {
 
         <template #expiresAt="{ row }">
           <span class="text-cp-text-secondary">
-            {{ row.expiresAt ? formatDateTime(row.expiresAt) : '—' }}
+            {{ row.expiresAtDisplay ?? '—' }}
           </span>
         </template>
 
@@ -158,7 +157,7 @@ function canDelete(record: BackupRecord): boolean {
 
         <template #startedAt="{ row }">
           <span class="text-cp-text-secondary">
-            {{ row.startedAt ? formatDateTime(row.startedAt) : '—' }}
+            {{ row.startedAtDisplay ?? '—' }}
           </span>
         </template>
 

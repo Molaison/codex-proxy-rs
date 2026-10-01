@@ -278,6 +278,15 @@ impl CodexProvider {
         })
     }
 
+    #[must_use]
+    pub(crate) fn with_timezone(
+        mut self,
+        timezone: gateway_core::time::DeploymentTimeZone,
+    ) -> Self {
+        self.client = self.client.with_timezone(timezone);
+        self
+    }
+
     pub(crate) fn with_session_identity(mut self, identity: CodexSessionIdentity) -> Self {
         self.session_identity = Some(identity);
         self

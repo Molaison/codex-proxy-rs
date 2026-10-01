@@ -294,10 +294,11 @@ const {
                 :status="derivedAccountStatus(row)"
                 :error-reason="row.errorReason"
                 :error-message="row.errorMessage"
-                :rate-limited-until="row.quota.rateLimitedUntil"
+                :rate-limit-recovery-display="row.quota.rateLimitRecoveryDisplay"
                 :rate-limit-reason="row.quota.rateLimitReason"
                 :recovery-probe-required="row.quota.recoveryProbeRequired"
                 :next-refresh-at="row.nextRefreshAt"
+                :next-refresh-at-display="row.nextRefreshAtDisplay"
               />
             </template>
 
@@ -316,7 +317,7 @@ const {
             </template>
 
             <template #lastUsedAt="{ row }">
-              <LastUsedAtCell :value="row.usage.lastUsedAt" />
+              <LastUsedAtCell :value="row.usage.lastUsedAt" :display="row.usage.lastUsedAtDisplay" :full-display="row.usage.lastUsedAtFullDisplay" />
             </template>
 
             <template #actions="{ row }">

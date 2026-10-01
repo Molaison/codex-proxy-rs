@@ -897,3 +897,47 @@ async fn control_plane_replacement_commits_one_writer_per_revision_and_preserves
     );
     database.close().await;
 }
+
+#[tokio::test]
+async fn warmup_slots_survive_restart_and_serialize_competing_claims() {
+    use gateway_core::{provider_ports::ProviderRuntimePolicyPort, time::DeploymentTimeZone};
+    let Some(database) = TestDatabase::create("warmup_slots").await else {
+        return;
+    };
+    let zone = DeploymentTimeZone::default();
+    let slot = zone
+        .local(Utc::now())
+        .date_naive()
+        .and_hms_opt(8, 0, 0)
+        .unwrap();
+    let first = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let second = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let (a, b) = tokio::join!(
+        first.claim_warmup_slot(zone, slot),
+        second.claim_warmup_slot(zone, slot)
+    );
+    assert_ne!(a.unwrap(), b.unwrap(), "one leader claims the local minute");
+    let restarted = PgRuntimeSettingsRepository::new(database.pool.clone());
+    assert!(!restarted.claim_warmup_slot(zone, slot).await.unwrap());
+    assert!(
+        restarted
+            .claim_warmup_slot(zone, slot + TimeDelta::hours(5))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !restarted.claim_warmup_slot(zone, slot).await.unwrap(),
+        "another slot cannot erase prior deduplication"
+    );
+    sqlx::query("update account_warmup_slots set claimed_at = now() - interval '8 days'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    assert!(restarted.claim_warmup_slot(zone, slot).await.unwrap());
+    let count: i64 = sqlx::query_scalar("select count(*) from account_warmup_slots")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "expired deduplication state is reclaimed");
+    database.close().await;
+}

@@ -15,7 +15,6 @@ import {
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { useIdSet } from '@/composables/useIdSet'
 import { usePagedQuery } from '@/composables/usePagedQuery'
-import { formatDateTime } from '@/utils/format'
 import { errorMessage } from '@/utils/operation'
 import { DEFAULT_ACCOUNT_GROUP_COLOR } from '../constants'
 
@@ -58,7 +57,6 @@ export function useAccountGroups() {
 
   const groups = computed(() => query.items.value.map(group => ({
     ...group,
-    updatedAtDisplay: formatDateTime(group.updatedAt),
   })))
   const pagination = computed(() => ({
     currentPage: query.page.value,

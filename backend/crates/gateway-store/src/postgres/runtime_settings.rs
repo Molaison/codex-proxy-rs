@@ -281,6 +281,34 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
 }
 
 impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
+    fn claim_warmup_slot<'a>(
+        &'a self,
+        timezone: gateway_core::time::DeploymentTimeZone,
+        slot: chrono::NaiveDateTime,
+    ) -> futures::future::BoxFuture<'a, Result<bool, ProviderStoreError>> {
+        Box::pin(async move {
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(|_| provider_unavailable("claim warmup slot"))?;
+            // 去重只需覆盖近期开关、重启与回拨，保留七天后由下一次领取回收。
+            sqlx::query(
+                "delete from account_warmup_slots where claimed_at < now() - interval '7 days'",
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| provider_unavailable("cleanup warmup slots"))?;
+            let claimed = sqlx::query("insert into account_warmup_slots (timezone, local_slot) values ($1, $2) on conflict do nothing")
+                .bind(timezone.name()).bind(slot).execute(&mut *transaction).await
+                .map_err(|_| provider_unavailable("claim warmup slot"))?.rows_affected() == 1;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| provider_unavailable("commit warmup slot"))?;
+            Ok(claimed)
+        })
+    }
     fn initialize_request_profile<'a>(
         &'a self,
         provider: &'a gateway_core::routing::ProviderKind,

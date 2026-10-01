@@ -8,7 +8,6 @@ import { createProxy, deleteProxy, getProxies, probeProxy, testProxy, updateProx
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { usePagedQuery } from '@/composables/usePagedQuery'
 import { normalizeRequestLocation, requestLocationError } from '@/utils/data'
-import { formatDateTime } from '@/utils/format'
 import ProxyAccountsModal from './components/ProxyAccountsModal.vue'
 import ProxyFormModal from './components/ProxyFormModal.vue'
 import { effectiveProxyLocation } from './utils/location'
@@ -316,7 +315,7 @@ onMounted(() => void query.execute())
               </button>
             </template>
             <template #testedAt="{ row }">
-              {{ row.lastTestAt ? formatDateTime(row.lastTestAt) : '-' }}
+              {{ row.lastTestAtDisplay ?? '-' }}
             </template>
             <template #actions="{ row }">
               <div class="flex items-center gap-1">

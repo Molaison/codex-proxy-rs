@@ -114,19 +114,24 @@ impl AdminTestFixture {
     }
 
     pub async fn with_system(system: Arc<dyn SystemOperations>) -> Self {
-        Self::with_dependencies(system, None).await
+        Self::with_dependencies(system, None, Default::default()).await
     }
 
     pub async fn with_key_verifier(
         verifier: Arc<dyn ClientKeyVerifier>,
         system: Arc<dyn SystemOperations>,
     ) -> Self {
-        Self::with_dependencies(system, Some(verifier)).await
+        Self::with_dependencies(system, Some(verifier), Default::default()).await
+    }
+
+    pub async fn with_timezone(timezone: gateway_core::time::DeploymentTimeZone) -> Self {
+        Self::with_dependencies(Arc::new(UnusedSystem), None, timezone).await
     }
 
     async fn with_dependencies(
         system: Arc<dyn SystemOperations>,
         verifier: Option<Arc<dyn ClientKeyVerifier>>,
+        timezone: gateway_core::time::DeploymentTimeZone,
     ) -> Self {
         let api_key = Arc::new(Mutex::new(None));
         let auth = Arc::new(MemoryAuthStore::new(api_key.clone()));
@@ -184,6 +189,7 @@ impl AdminTestFixture {
             ClientConfig::default(),
             stores,
             gateway_admin::AdminRuntimePorts {
+                timezone,
                 service_middleware: std::sync::Arc::new(|| None),
                 plugin_preparation: plugin_ports.clone(),
                 plugin_management: plugin_ports.clone(),
@@ -1029,6 +1035,26 @@ impl AccountStore for UnusedStore {
         _: AccountListQuery,
         _: AccountRuntimeSnapshot,
     ) -> AdminStoreResult<AccountPage> {
+        if let Some(account) = self.account.lock().expect("account").as_ref() {
+            let status = account.projection.status;
+            return Ok(AccountPage {
+                config_revision: Revision::new(1).unwrap(),
+                items: vec![account.clone()],
+                total: 1,
+                summary: gateway_admin::model::accounts::AccountSummary {
+                    total: 1,
+                    normal: u64::from(status == gateway_core::account::AccountStatus::Normal),
+                    quota_exhausted: u64::from(
+                        status == gateway_core::account::AccountStatus::QuotaExhausted,
+                    ),
+                    rate_limited: u64::from(
+                        status == gateway_core::account::AccountStatus::RateLimited,
+                    ),
+                    disabled: u64::from(status == gateway_core::account::AccountStatus::Disabled),
+                    error: u64::from(status == gateway_core::account::AccountStatus::Error),
+                },
+            });
+        }
         Err(unavailable("account list"))
     }
 
