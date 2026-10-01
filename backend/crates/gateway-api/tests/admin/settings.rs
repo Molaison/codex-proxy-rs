@@ -50,6 +50,7 @@ fn update_body() -> Value {
         "requestIntervalMs": 25,
         "maxWaitingPerKey": 0,
         "maxWaitingPerAccount": 0,
+        "openaiGuardianReservedConcurrency": 0,
         "concurrencyWaitTimeoutSeconds": 30,
         "responsesMaxDecompressedBodyBytes": 67108864,
         "rotationStrategy": "round_robin",
@@ -220,6 +221,7 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         max_waiting_per_key: 0,
         max_waiting_per_account: 0,
         concurrency_wait_timeout_seconds: 30,
+        openai_guardian_reserved_concurrency: 0,
         responses_max_decompressed_body_bytes: 64 * 1024 * 1024,
         smart_scheduling: gateway_core::account::SmartSchedulingConfig::default(),
         rotation_strategy: RotationStrategy::RoundRobin,
@@ -268,6 +270,7 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "requestIntervalMs": 25,
             "maxWaitingPerKey": 0,
             "maxWaitingPerAccount": 0,
+            "openaiGuardianReservedConcurrency": 0,
             "concurrencyWaitTimeoutSeconds": 30,
             "responsesMaxDecompressedBodyBytes": 67108864,
             "rotationStrategy": "round_robin",
@@ -337,6 +340,7 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         max_waiting_per_key: 0,
         max_waiting_per_account: 0,
         concurrency_wait_timeout_seconds: 30,
+        openai_guardian_reserved_concurrency: 0,
         responses_max_decompressed_body_bytes: 64 * 1024 * 1024,
         smart_scheduling: request.smart_scheduling,
         rotation_strategy: RotationStrategy::parse(&request.rotation_strategy)
@@ -1275,4 +1279,51 @@ async fn settings_update_rejects_a_stale_version_without_replacing_the_saved_val
         response_json(retry).await["data"]["refreshMarginSeconds"],
         9999
     );
+}
+
+#[tokio::test]
+async fn guardian_reservation_round_trips_and_rejects_invalid_values() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let response = app(fixture.state())
+        .oneshot(request(Method::GET, "/api/admin/settings", None))
+        .await
+        .unwrap();
+    let mut revision = response_json(response).await["data"]["configRevision"].clone();
+    for reserved in [1_u32, u32::MAX, 0] {
+        let mut body = update_body();
+        body["configRevision"] = revision;
+        body["openaiGuardianReservedConcurrency"] = json!(reserved);
+        let response = app(fixture.state())
+            .oneshot(request(
+                Method::POST,
+                "/api/admin/settings/update",
+                Some(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await["data"]["openaiGuardianReservedConcurrency"],
+            reserved
+        );
+        let response = app(fixture.state())
+            .oneshot(request(Method::GET, "/api/admin/settings", None))
+            .await
+            .unwrap();
+        let data = response_json(response).await["data"].clone();
+        revision = data["configRevision"].clone();
+        assert_eq!(data["openaiGuardianReservedConcurrency"], reserved);
+    }
+    for invalid in [json!(-1), json!(1.5), json!(4294967296_u64)] {
+        let mut body = update_body();
+        body["openaiGuardianReservedConcurrency"] = invalid;
+        assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(body).is_err());
+    }
+    let mut omitted = update_body();
+    omitted
+        .as_object_mut()
+        .unwrap()
+        .remove("openaiGuardianReservedConcurrency");
+    assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(omitted).is_err());
 }
