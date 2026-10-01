@@ -936,7 +936,7 @@ fn invalid_refresh_policy(operation: &'static str) -> ProviderStoreError {
 }
 
 pub trait ProviderRuntimePolicyPort: Send + Sync {
-    /// 原子领取每日时间槽，跨进程重启与重复本地时刻保持幂等。
+    /// 原子推进预热执行游标，重启或时钟回拨后不重复领取已消费的时刻。
     fn claim_warmup_slot<'a>(
         &'a self,
         _timezone: crate::time::DeploymentTimeZone,

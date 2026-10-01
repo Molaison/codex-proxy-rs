@@ -289,25 +289,20 @@ impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
         slot: chrono::NaiveDateTime,
     ) -> futures::future::BoxFuture<'a, Result<bool, ProviderStoreError>> {
         Box::pin(async move {
-            let mut transaction = self
-                .pool
-                .begin()
-                .await
-                .map_err(|_| provider_unavailable("claim warmup slot"))?;
-            // 去重只需覆盖近期开关、重启与回拨，保留七天后由下一次领取回收。
-            sqlx::query(
-                "delete from account_warmup_slots where claimed_at < now() - interval '7 days'",
+            let slot = timezone.resolve_local(slot).ok_or_else(|| {
+                ProviderStoreError::new(ProviderStoreErrorKind::InvalidData, "resolve warmup slot")
+            })?;
+            // 执行游标只向前推进；设置保存不覆盖它，领取也不发布新的配置版本。
+            let claimed = sqlx::query(
+                "update runtime_settings set account_warmup_cursor = $1
+                 where id = 1 and (account_warmup_cursor is null or account_warmup_cursor < $1)",
             )
-            .execute(&mut *transaction)
+            .bind(slot)
+            .execute(&self.pool)
             .await
-            .map_err(|_| provider_unavailable("cleanup warmup slots"))?;
-            let claimed = sqlx::query("insert into account_warmup_slots (timezone, local_slot) values ($1, $2) on conflict do nothing")
-                .bind(timezone.name()).bind(slot).execute(&mut *transaction).await
-                .map_err(|_| provider_unavailable("claim warmup slot"))?.rows_affected() == 1;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| provider_unavailable("commit warmup slot"))?;
+            .map_err(|_| provider_unavailable("claim warmup slot"))?
+            .rows_affected()
+                == 1;
             Ok(claimed)
         })
     }
