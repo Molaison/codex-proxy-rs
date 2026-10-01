@@ -643,6 +643,23 @@ fn image_response_metering(
     (usage != Usage::default()).then_some((usage, cost))
 }
 
+/// 记录上游拒绝的加密历史回填，使同会话的下一次尝试先净化请求体。
+fn mark_encrypted_replay_rejection(
+    failure: &MappedProviderFailure,
+    key: Option<&ProviderSessionAffinityKey>,
+    recovery: &CodexSessionTransportRecovery,
+) {
+    let rejected = failure
+        .error
+        .upstream_code()
+        .is_some_and(|code| failure::is_encrypted_replay_failure_code(code.as_str()));
+    if rejected
+        && let Some(key) = key
+    {
+        recovery.require_encrypted_replay_sanitization(key);
+    }
+}
+
 pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     let ColdResponse {
         client,
@@ -942,6 +959,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         )
                         .await;
                     }
+                    mark_encrypted_replay_rejection(
+                        &failure,
+                        session_affinity_key.as_ref(),
+                        &session_transport_recovery,
+                    );
                     apply_failure(&failure_context, &active_account, &failure)
                     .await;
                     Err(quota_continuation_replay_error(

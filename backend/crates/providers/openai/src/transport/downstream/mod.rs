@@ -7,6 +7,7 @@ mod headers;
 
 use serde_json::{Map, Value};
 
+pub(crate) use body::strip_unverifiable_encrypted_replay;
 pub(super) use body::normalize_codex_request_body;
 
 pub(crate) fn normalize_selected_codex_downstream_body(
