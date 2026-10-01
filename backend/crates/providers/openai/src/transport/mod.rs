@@ -19,7 +19,7 @@ pub mod reset_credits;
 mod response_meta;
 pub(crate) mod session;
 pub mod subscription;
-pub(crate) use downstream::normalize_selected_codex_downstream_body;
+pub(crate) use downstream::{normalize_selected_codex_downstream_body, strip_unverifiable_encrypted_replay};
 pub(crate) use endpoints::valid_upstream_base_url;
 pub mod tls;
 pub mod usage;

@@ -1337,9 +1337,14 @@ pub(super) fn map_upstream_failure(
         .status
         .is_some_and(|status| status.is_client_error())
         && is_cyber_policy_code(failure.code.as_deref());
+    // 加密历史在当前账号不可验证时，上游只会拒绝该输入，客户端无法自行修复：
+    // 保留 "客户端重放" 会把失败原样暴露给不认识该信号的客户端，改为代理净化后同账号重放。
+    let encrypted_replay_rejected = failure
+        .persistable_code()
+        .is_some_and(is_encrypted_replay_failure_code);
     let continuation_failure = failure
         .persistable_code()
-        .filter(|code| is_history_failure_code(code))
+        .filter(|code| is_history_failure_code(code) && !is_encrypted_replay_failure_code(code))
         .map(|_| ContinuationFailure::HistoryUnavailable);
     let send_state = upstream_send_state(failure.send_phase);
     let error_kind = if continuation_failure.is_some() {
@@ -1392,6 +1397,16 @@ pub(super) fn map_upstream_failure(
     if let Some(retry_after) = failure.retry_after_seconds.map(Duration::from_secs) {
         error = error.with_retry_after(retry_after);
     }
+    if encrypted_replay_rejected && replay_boundary.permits_provider_proof() {
+        // 上游明确拒绝该输入且未产生可用输出，代理可以安全地同账号重放一次。
+        error = error
+            .with_replay_safe()
+            .with_transient_retry(
+                NonZeroU32::new(1).unwrap_or(NonZeroU32::MIN),
+                Duration::from_millis(250),
+                Duration::from_secs(2),
+            );
+    }
     if capacity_unavailable && error.replay_is_safe() {
         let max_delay = Duration::from_secs(8);
         error = error.with_transient_retry(
@@ -1426,11 +1441,16 @@ pub(super) fn map_upstream_failure(
     MappedProviderFailure {
         error,
         websocket_transport_retryable: false,
-        account_failure: account_failure(
-            category,
-            failure.retry_after_seconds,
-            failure.usage_limit_resets_at,
-        ),
+        // 输入被拒不代表账号故障；净化重放由本请求自己承担，不能冷却该账号。
+        account_failure: if encrypted_replay_rejected {
+            None
+        } else {
+            account_failure(
+                category,
+                failure.retry_after_seconds,
+                failure.usage_limit_resets_at,
+            )
+        },
         error_message: failure.client_message,
         cyber_policy_failure,
         // 普通 5xx 与未知流内错误不足以证明容量拒绝，不能用于冻结账号。
@@ -1447,6 +1467,11 @@ pub(super) fn map_upstream_failure(
 
 pub(super) fn is_cyber_policy_code(code: Option<&str>) -> bool {
     code.is_some_and(|code| code.trim().eq_ignore_ascii_case("cyber_policy"))
+}
+
+/// 上游拒绝加密历史回填的错误码；该输入不可修复，只能净化后重放。
+pub(super) fn is_encrypted_replay_failure_code(code: &str) -> bool {
+    code == "invalid_encrypted_content"
 }
 
 pub(super) fn is_history_failure_code(code: &str) -> bool {

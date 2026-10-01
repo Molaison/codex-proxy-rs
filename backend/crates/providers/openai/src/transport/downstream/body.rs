@@ -33,6 +33,37 @@ pub(crate) fn normalize_non_codex_request_body(body: &mut Map<String, Value>) {
     }
 }
 
+/// 丢弃上游无法验证的加密历史回填；只在上游明确拒绝同一账号后调用。
+///
+/// 上游用 `invalid_encrypted_content` 表示当前账号/连接无法解密该条加密载荷。
+/// 密文本身无法在代理侧修复，原样重放只会再次被拒：这里移除携带非空加密载荷的
+/// `reasoning` 项，并剔除以 `encrypted_content` 形式内嵌的内容片段，保留同一线程的
+/// 明文历史、工具调用配对与顺序，使同账号重放可以继续。
+pub(crate) fn strip_unverifiable_encrypted_replay(body: &mut Map<String, Value>) {
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    input.retain(|item| {
+        let Some(item) = item.as_object() else {
+            return true;
+        };
+        !(item.get("type").and_then(Value::as_str) == Some("reasoning")
+            && item
+                .get("encrypted_content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| !content.trim().is_empty()))
+    });
+    for item in input {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        content.retain(|entry| entry.get("type").and_then(Value::as_str) != Some("encrypted_content"));
+    }
+}
+
 /// 补齐 Codex 请求缺省字段并适配已确认不兼容的请求形状，不递归清洗业务正文。
 ///
 /// 兼容基准是 Codex Core/Desktop 的模型请求，不是公开 OpenAI Responses API。
@@ -81,5 +112,61 @@ pub(in crate::transport) fn normalize_codex_request_body(body: &mut Map<String, 
         "prompt_cache_retention",
     ] {
         body.remove(field);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(body: &Map<String, Value>) -> &Vec<Value> {
+        body.get("input")
+            .and_then(Value::as_array)
+            .expect("input array")
+    }
+
+    #[test]
+    fn strip_unverifiable_encrypted_replay_keeps_plaintext_history() {
+        let mut body = Map::from_iter([(
+            "input".to_owned(),
+            json!([
+                {"type": "reasoning", "encrypted_content": "AAAA", "summary": []},
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "plain"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "hi"},
+                        {"type": "encrypted_content", "encrypted_content": "BBBB"},
+                    ],
+                },
+                {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+            ]),
+        )]);
+
+        strip_unverifiable_encrypted_replay(&mut body);
+
+        let items = input(&body);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["type"], "reasoning");
+        assert!(items[0].get("encrypted_content").is_none());
+        assert_eq!(items[1]["type"], "message");
+        assert_eq!(items[1]["content"].as_array().map(Vec::len), Some(1));
+        assert_eq!(items[2]["type"], "function_call_output");
+    }
+
+    #[test]
+    fn strip_unverifiable_encrypted_replay_leaves_other_bodies_untouched() {
+        let original = json!([{"type": "message", "role": "user", "content": []}]);
+        let mut body = Map::from_iter([("input".to_owned(), original.clone())]);
+        strip_unverifiable_encrypted_replay(&mut body);
+        assert_eq!(body.get("input"), Some(&original));
+
+        let mut empty = Map::new();
+        strip_unverifiable_encrypted_replay(&mut empty);
+        assert!(empty.is_empty());
     }
 }

@@ -17,6 +17,8 @@ pub(crate) struct CodexSessionTransportRecovery {
 
 struct SessionTransport {
     state: TransportState,
+    /// 上游拒绝的加密历史回填所属请求；只对该请求的重放生效。
+    sanitize_encrypted_replay: Option<String>,
     last_used: Instant,
 }
 
@@ -64,20 +66,63 @@ impl CodexSessionTransportRecovery {
         self.lock().remove(key);
     }
 
+    /// 记录上游拒绝了该请求的加密历史回填；只影响该请求的重放，空闲过期后自然失效。
+    pub(crate) fn require_encrypted_replay_sanitization(
+        &self,
+        key: &ProviderSessionAffinityKey,
+        request_id: &str,
+    ) {
+        let request_id = request_id.to_owned();
+        let _ = self.mutate(key, move |session| {
+            session.sanitize_encrypted_replay = Some(request_id)
+        });
+    }
+
+    /// 返回同一请求的重放是否需要先丢弃无法验证的加密历史。
+    pub(crate) fn sanitize_encrypted_replay(
+        &self,
+        key: &ProviderSessionAffinityKey,
+        request_id: &str,
+    ) -> bool {
+        let now = Instant::now();
+        let mut sessions = self.lock();
+        let Some(session) = sessions.get_mut(key) else {
+            return false;
+        };
+        if now.saturating_duration_since(session.last_used) >= SESSION_IDLE_RETENTION {
+            sessions.remove(key);
+            return false;
+        }
+        session.last_used = now;
+        session.sanitize_encrypted_replay.as_deref() == Some(request_id)
+    }
+
     fn update(
         &self,
         key: &ProviderSessionAffinityKey,
         update: impl FnOnce(TransportState) -> TransportState,
     ) -> bool {
+        self.mutate(key, |session| {
+            session.state = update(std::mem::replace(&mut session.state, TransportState::Http));
+        })
+    }
+
+    fn mutate(
+        &self,
+        key: &ProviderSessionAffinityKey,
+        mutate: impl FnOnce(&mut SessionTransport),
+    ) -> bool {
         let now = Instant::now();
         let mut sessions = self.lock();
-        let previous = sessions
+        let mut session = sessions
             .remove(key)
             .filter(|session| {
                 now.saturating_duration_since(session.last_used) < SESSION_IDLE_RETENTION
             })
-            .map_or(TransportState::WebSocket { failures: 0 }, |session| {
-                session.state
+            .unwrap_or(SessionTransport {
+                state: TransportState::WebSocket { failures: 0 },
+                sanitize_encrypted_replay: None,
+                last_used: now,
             });
         if sessions.len() >= MAX_SESSION_TRANSPORTS {
             sessions.retain(|_, session| {
@@ -92,15 +137,10 @@ impl CodexSessionTransportRecovery {
                 sessions.remove(&oldest);
             }
         }
-        let state = update(previous);
-        let uses_http = matches!(state, TransportState::Http);
-        sessions.insert(
-            key.clone(),
-            SessionTransport {
-                state,
-                last_used: now,
-            },
-        );
+        mutate(&mut session);
+        session.last_used = now;
+        let uses_http = matches!(session.state, TransportState::Http);
+        sessions.insert(key.clone(), session);
         uses_http
     }
 

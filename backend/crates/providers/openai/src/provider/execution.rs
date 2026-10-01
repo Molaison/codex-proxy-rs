@@ -231,6 +231,7 @@ impl CodexProvider {
             lease: Arc::clone(&lease),
             output_started_at: Instant::now(),
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::into_key),
+            session_transport_recovery: self.session_transport_recovery.clone(),
         });
         let stream = ProviderStream::new(metadata, events, lease);
         Ok(if allows_account_state_mutation {
@@ -287,6 +288,7 @@ pub(super) struct ColdJsonResponse {
     pub(super) lease: Arc<CodexCredentialLease>,
     pub(super) output_started_at: Instant,
     pub(super) session_affinity_key: Option<ProviderSessionAffinityKey>,
+    pub(super) session_transport_recovery: CodexSessionTransportRecovery,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -537,6 +539,12 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
                 if let Some(observation) = failure.observation.take() {
                     yield ProviderEvent::observation(observation);
                 }
+                mark_encrypted_replay_rejection(
+                    &failure,
+                    request.session_affinity_key.as_ref(),
+                    &request.session_transport_recovery,
+                    request.context.request_id().as_str(),
+                );
                 apply_failure(&failure_context, &active_account, &failure).await;
                 Err(failure.error)?;
                 return;
@@ -641,6 +649,24 @@ fn image_response_metering(
     usage.total_tokens = raw.get("total_tokens").and_then(Value::as_u64);
     let cost = crate::transport::usage::image_calculated_cost(request_body, &raw, prices);
     (usage != Usage::default()).then_some((usage, cost))
+}
+
+/// 记录上游拒绝的加密历史回填，使同会话的下一次尝试先净化请求体。
+fn mark_encrypted_replay_rejection(
+    failure: &MappedProviderFailure,
+    key: Option<&ProviderSessionAffinityKey>,
+    recovery: &CodexSessionTransportRecovery,
+    request_id: &str,
+) {
+    let rejected = failure
+        .error
+        .upstream_code()
+        .is_some_and(|code| failure::is_encrypted_replay_failure_code(code.as_str()));
+    if rejected
+        && let Some(key) = key
+    {
+        recovery.require_encrypted_replay_sanitization(key, request_id);
+    }
 }
 
 pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
@@ -750,6 +776,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 if let Some(observation) = failure.observation.take() {
                     yield ProviderEvent::observation(observation);
                 }
+                mark_encrypted_replay_rejection(
+                    &failure,
+                    session_affinity_key.as_ref(),
+                    &session_transport_recovery,
+                    context.request_id().as_str(),
+                );
                 apply_failure(&failure_context, &active_account, &failure)
                 .await;
                 Err(quota_continuation_replay_error(
@@ -942,6 +974,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         )
                         .await;
                     }
+                    mark_encrypted_replay_rejection(
+                        &failure,
+                        session_affinity_key.as_ref(),
+                        &session_transport_recovery,
+                        context.request_id().as_str(),
+                    );
                     apply_failure(&failure_context, &active_account, &failure)
                     .await;
                     Err(quota_continuation_replay_error(
