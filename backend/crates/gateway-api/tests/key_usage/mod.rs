@@ -163,6 +163,8 @@ fn assert_fields(value: &Value, expected: &[&str]) {
 #[tokio::test]
 async fn overview_scopes_every_query_and_projects_only_key_visible_fields() {
     let fixture = fixtures::fixture().await;
+    fixture.observations.lock().unwrap().trend.as_mut().unwrap()[0].bucket_start =
+        "2026-09-01T04:30:00Z".parse().unwrap();
     let app = crate::openai::api_router_with_admin(fixture.services.clone());
     let cookie = login(&app, "key").await;
     let response = get(&app, "overview", "&model=%20coding%20", &cookie).await;
@@ -206,6 +208,8 @@ async fn overview_scopes_every_query_and_projects_only_key_visible_fields() {
     assert_eq!(data["summary"]["costUsd"], "0.123456");
     assert_eq!(data["summary"]["costIncomplete"], true);
     assert_eq!(data["trend"][0]["bucketSeconds"], 900);
+    assert_eq!(data["trend"][0]["time"], "2026-09-01T04:30:00Z");
+    assert_eq!(data["trend"][0]["label"], "09-01 12:30");
     assert_eq!(
         data["healthTimeline"]["points"].as_array().unwrap().len(),
         96
