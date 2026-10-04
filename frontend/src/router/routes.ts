@@ -33,6 +33,11 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('@/views/dashboard/index.vue'),
       },
       {
+        path: 'models',
+        name: 'model-management',
+        component: () => import('@/views/model-management/index.vue'),
+      },
+      {
         path: 'accounts',
         name: 'accounts',
         component: () => import('@/views/accounts/index.vue'),
