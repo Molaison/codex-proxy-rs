@@ -1089,8 +1089,16 @@ async fn calendar_queries_and_display_follow_deployment_timezone_with_one_anchor
         let labels = points
             .iter()
             .map(|p| p["time"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(labels.iter().all(|label| label.len() == 5));
+        let buckets = points
+            .iter()
+            .map(|p| p["bucketStart"].as_str().unwrap())
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(labels.len(), slots, "fold labels remain distinct");
+        assert_eq!(buckets.len(), slots, "fold buckets remain distinct");
+        if slots == 100 {
+            assert_eq!(labels.iter().filter(|label| **label == "01:00").count(), 2);
+        }
         let invalid = router.oneshot(Request::builder()
             .uri(format!("/api/admin/dashboard/summary?period=today&asOf={}&startTime=2026-01-01T00%3A00%3A00Z", end.timestamp_millis()))
             .header(header::COOKIE, "cpr_session=valid-session")

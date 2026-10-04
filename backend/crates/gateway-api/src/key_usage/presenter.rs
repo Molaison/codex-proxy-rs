@@ -160,7 +160,7 @@ pub(super) fn overview(value: KeyUsageOverview, time: crate::time::TimePresenter
                     if point.granularity == Granularity::Day {
                         "%m-%d"
                     } else {
-                        "%m-%d %H:%M %:z"
+                        "%m-%d %H:%M"
                     },
                 ),
                 bucket_seconds: match point.granularity {

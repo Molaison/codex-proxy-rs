@@ -71,7 +71,7 @@ async function openAbout() {
         <KeyUsageRecords v-model:kind="kind" :rows="items" :pagination="{ currentPage, pageSize, total }" :loading="recordsLoading" :error="recordsError" :stale="recordsStale" @page-change="changePage" @page-size-change="changePageSize" />
       </div>
     </BaseScrollbar>
-    <ApiKeyConfigModal v-model="showConfig" title="密钥配置" :api-key="configKey" :api-base-url="apiBaseUrl" @copy="copyConfig" />
+    <ApiKeyConfigModal v-model="showConfig" title="密钥配置" :api-key="configKey" :api-base-url="apiBaseUrl" @copy="copyConfig" @after-leave="configKey = null" />
     <AppAboutModal v-model="aboutOpen" :version="version" />
   </main>
 </template>

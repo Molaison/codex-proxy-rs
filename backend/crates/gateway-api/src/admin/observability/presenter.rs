@@ -662,7 +662,7 @@ pub(crate) fn trend_point_view(
     time: crate::time::TimePresenter,
 ) -> TrendPointView {
     let local_time = time.label(point.bucket_start, "%H:%M");
-    let label = time.label(point.bucket_start, "%m-%d %H:%M %:z");
+    let label = time.label(point.bucket_start, "%m-%d %H:%M");
     let success_rate_value = point.success_rate.map(|value| value * 100.0);
     TrendPointView {
         time: local_time,
@@ -835,7 +835,7 @@ pub(crate) fn health_timeline_view(
             .into_iter()
             .map(|point| HealthTimelinePointView {
                 bucket_start: point.bucket_start,
-                time: time.label(point.bucket_start, "%H:%M %:z"),
+                time: time.label(point.bucket_start, "%H:%M"),
                 status: health_status_name(point.status).to_owned(),
                 reliability_display: reliability_display(point.reliability_percent),
                 success_requests: point.success_requests,
@@ -1061,7 +1061,7 @@ pub(crate) fn usage_insights_view(
         .iter()
         .map(|point| OverviewHealthPointView {
             bucket: point.bucket_start,
-            label: time.label(point.bucket_start, "%m-%d %H:%M %:z"),
+            label: time.label(point.bucket_start, "%m-%d %H:%M"),
             total_requests: point.total_requests,
             success_requests: point.success_requests,
             failed_requests: point.failed_requests,
@@ -1077,7 +1077,7 @@ pub(crate) fn usage_insights_view(
         .iter()
         .map(|point| OverviewPerformancePointView {
             bucket: point.bucket_start,
-            label: time.label(point.bucket_start, "%m-%d %H:%M %:z"),
+            label: time.label(point.bucket_start, "%m-%d %H:%M"),
             latency_p50_ms: point.latency_percentiles.p50_ms.map(|value| value.as_f64()),
             latency_p95_ms: point.latency_percentiles.p95_ms.map(|value| value.as_f64()),
             latency_p99_ms: point.latency_percentiles.p99_ms.map(|value| value.as_f64()),
@@ -1126,7 +1126,7 @@ pub(crate) fn usage_insights_view(
         .iter()
         .map(|point| OverviewCostPointView {
             bucket: point.bucket_start,
-            label: time.label(point.bucket_start, "%m-%d %H:%M %:z"),
+            label: time.label(point.bucket_start, "%m-%d %H:%M"),
             input_tokens: point.input_tokens,
             output_tokens: point.output_tokens,
             cached_tokens: point.cached_tokens,

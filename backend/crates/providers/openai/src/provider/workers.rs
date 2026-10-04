@@ -429,18 +429,6 @@ impl ScheduledTask for OpenAiWarmupTask {
                     tracing::warn!(error = %error, "OpenAI account warmup cycle failed");
                 }
             }
-            let local_after = self.timezone.local(chrono::Utc::now());
-            if local_after.date_naive() == local_now.date_naive()
-                && local_after.hour() == hour
-                && local_after.minute() == minute
-            {
-                // 持有本轮 leader lease 到时间槽结束，避免其他实例在同一分钟再次执行。
-                let hold = Duration::from_secs(u64::from(61 - local_after.second()));
-                tokio::select! {
-                    () = context.cancellation().cancelled() => return Ok(()),
-                    () = tokio::time::sleep(hold) => {}
-                }
-            }
             Ok(())
         })
     }

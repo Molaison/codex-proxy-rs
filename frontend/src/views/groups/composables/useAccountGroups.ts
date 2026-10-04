@@ -36,6 +36,7 @@ export function useAccountGroups() {
   const editingGroup = shallowRef<AccountGroup | null>(null)
   const pendingDeleteGroup = shallowRef<AccountGroup | null>(null)
   const pendingDisableGroup = shallowRef<AccountGroup | null>(null)
+  const deleteCount = shallowRef(0)
   const clientKeys = shallowRef<ApiKey[]>([])
   const form = ref<AccountGroupFormValue>(emptyForm())
   const savingAction = useAsyncAction()
@@ -69,10 +70,14 @@ export function useAccountGroups() {
   const disabling = disablingAction.loading
   const updatingStatusGroupIds = updatingStatusGroups.ids
   const referencedKeyNames = computed(() => {
-    const groupId = pendingDisableGroup.value?.id ?? pendingDeleteGroup.value?.id
+    const groupId = pendingDisableGroup.value?.id
     if (!groupId)
       return []
     return referenceKeyNamesFor(groupId)
+  })
+  watch([showBatchDeleteModal, batchDeleting], ([open, busy]) => {
+    if (open && !busy)
+      deleteCount.value = selectedIds.value.size
   })
 
   function referenceKeyNamesFor(groupId: string) {
@@ -144,8 +149,6 @@ export function useAccountGroups() {
         })
       }
       showFormModal.value = false
-      editingGroup.value = null
-      form.value = emptyForm()
       await Promise.all([query.execute(), loadReferenceKeys()])
       toast.success(updating ? '分组已更新' : '分组已创建')
     })
@@ -167,7 +170,6 @@ export function useAccountGroups() {
     await disablingAction.run(async () => {
       await disableAccountGroup({ id: group.id })
       showDisableModal.value = false
-      pendingDisableGroup.value = null
       await query.execute()
       toast.success('分组已禁用')
     })
@@ -200,7 +202,6 @@ export function useAccountGroups() {
       remaining.delete(group.id)
       selectedIds.value = remaining
       showDeleteModal.value = false
-      pendingDeleteGroup.value = null
       await query.execute()
       toast.success('分组已删除')
     }, { onError: () => void query.execute() })
@@ -264,13 +265,6 @@ export function useAccountGroups() {
     query.page.value = 1
     void query.execute()
   })
-  watch(showFormModal, (open) => {
-    if (!open && !saving.value) {
-      editingGroup.value = null
-      form.value = emptyForm()
-    }
-  })
-
   onMounted(() => {
     void Promise.all([query.execute(), loadReferenceKeys()])
   })
@@ -289,6 +283,7 @@ export function useAccountGroups() {
     editingGroup,
     pendingDeleteGroup,
     pendingDisableGroup,
+    deleteCount,
     form,
     saving,
     deleting,

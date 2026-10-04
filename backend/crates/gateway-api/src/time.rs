@@ -69,8 +69,8 @@ impl TimePresenter {
                     request_count: count,
                     label: format!(
                         "{}–{} · {count} 次请求",
-                        self.label(start, "%m-%d %H:%M %:z"),
-                        self.label(end, "%H:%M %:z")
+                        self.label(start, "%m-%d %H:%M"),
+                        self.label(end, "%H:%M")
                     ),
                 }
             })

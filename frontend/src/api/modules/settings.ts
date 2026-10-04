@@ -29,6 +29,7 @@ export interface RuntimeSettings {
   refreshMarginSeconds: number
   refreshConcurrency: number
   maxConcurrentPerAccount: number
+  openaiGuardianReservedConcurrency: number
   requestIntervalMs: number
   maxWaitingPerKey: number
   maxWaitingPerAccount: number

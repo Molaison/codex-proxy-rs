@@ -538,7 +538,7 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
   })
 
   watch([showConnectionTestModal, () => testingAccount.value?.id], ([open]) => {
-    modelsRequest.invalidate()
+    modelsRequest.invalidate({ resetLoading: open })
     if (!open) {
       abortConnectionTest()
     }

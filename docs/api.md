@@ -166,7 +166,7 @@ Codex PAT 验证服务不可用和身份响应无效分别返回 `50301`、`5020
 图表的 `label`、日期提示和空桶由后端提供；日粒度按本地日界，小时及 15 分钟桶以 UTC 时间点定位。
 账号请求柱覆盖截至锚点的最近 24 个 UTC 小时桶，包含当前未完整小时，独立于今日汇总的自然日范围。
 健康时间线覆盖锚点所在自然日，每 15 分钟一个桶，夏令时日期可以为 92 或 100 个桶。
-重复本地时刻的标签携带偏移，唯一键、排序和去重仍使用原始时间点。
+图表时间标签不显示时区偏移，重复本地时刻可以使用相同展示文本；唯一键、排序和去重使用原始时间点。
 只有日历日期的上游统计保留日期语义，不当作 UTC 午夜换算
 
 ### 管理写入一致性
@@ -1218,6 +1218,7 @@ refreshConcurrency
 maxConcurrentPerAccount
 maxWaitingPerKey
 maxWaitingPerAccount
+openaiGuardianReservedConcurrency
 concurrencyWaitTimeoutSeconds
 responsesMaxDecompressedBodyBytes
 requestIntervalMs
@@ -1243,7 +1244,7 @@ accountWarmupModel
 定时账号预热默认关闭。`accountWarmupScheduleTime` 使用部署时区中的 `HH:MM`，
 多个时段以逗号分隔，默认 `08:00`；`accountWarmupModel` 默认 `null`，开启前必须显式选择模型。
 任务面向可用的 OpenAI OAuth 账号，跳过周额度耗尽及五小时窗口距离重置仍超过 30 分钟的账号。
-不存在的本地时刻跳过，重复时刻只执行较早一次；同一本地分钟的去重跨进程重启保留。
+不存在的本地时刻跳过，重复时刻只执行较早一次；执行进度跨重启保留，时钟回拨不补跑已领取时刻之前的时段。
 只有收到响应成功终态才记为预热成功；预热不计入客户端业务用量
 
 `requestLocationEnabled` 是必填布尔值，默认 `false`：关闭时不覆盖客户端原有位置和时区；开启时使用已保存的
@@ -1264,6 +1265,13 @@ accountWarmupModel
 `concurrencyWaitTimeoutSeconds` 取值 1～120，默认 30，从首次入队开始计时，密钥与账号两层共享该等待时限；
 切换账号或内部重试不重新计时，等待同时计入请求总超时。该时限不用于中断已开始的上游生成。
 设置更新请求须包含这三个字段，新请求使用更新后的快照
+
+`openaiGuardianReservedConcurrency`（默认 0，取值 0～4,294,967,295）为 Codex Guardian 自动审批保留账号并发，保存后对新请求生效。
+Guardian 以 `subagent_kind` 或 `client_metadata.x-openai-subagent` 值 `guardian` 识别。取值 R 大于 0 时，
+有限上限为 L 的账号对其他 OpenAI 请求只开放 `max(L − R, 1)` 个名额，Guardian 可用满 L；
+开启账号排队后，Guardian 排在同账号已有 Guardian 之后、全部普通等待者之前，不受单账号排队上限约束，
+仍受总等待容量与等待时限约束。不限并发的账号和关闭排队时的其余行为不变。
+设置更新请求须包含该字段
 
 `responsesMaxDecompressedBodyBytes` 是压缩 Responses HTTP 请求的解压输出上限，单位字节，默认
 67108864（64 MiB）。必须为正整数，且可表示为进程平台的 `isize`；管理端以整数 MiB 编辑。
