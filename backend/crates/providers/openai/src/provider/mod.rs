@@ -799,14 +799,13 @@ impl CodexProvider {
                 upstream_request.body_mut(),
                 generate.protocol_payload().context(),
             );
-            // 同一会话曾被上游拒绝加密历史回填：先净化再重放，避免把无法修复的
-            // 密文重复送到同一个账号，也避免把官方重放信号交给不识别它的客户端。
-            if session_affinity.as_ref().is_some_and(|affinity| {
-                self.session_transport_recovery
-                    .sanitize_encrypted_replay(affinity.key(), context.request_id().as_str())
-            }) {
-                strip_unverifiable_encrypted_replay(upstream_request.body_mut());
-            }
+        }
+        // 明确拒绝后的同请求重放也适用于 API-key 上游；协议规范化仍仅限 OAuth。
+        if session_affinity.as_ref().is_some_and(|affinity| {
+            self.session_transport_recovery
+                .sanitize_encrypted_replay(affinity.key(), context.request_id().as_str())
+        }) {
+            strip_unverifiable_encrypted_replay(upstream_request.body_mut());
         }
         if let Some(location) = lease
             .account()

@@ -12,7 +12,18 @@ pub(crate) fn normalize_non_codex_request_body(body: &mut Map<String, Value>) {
         let Some(item) = item.as_object_mut() else {
             continue;
         };
-        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        let is_message = item.get("type").and_then(Value::as_str) == Some("message");
+        let is_reasoning = item.get("type").and_then(Value::as_str) == Some("reasoning");
+        if is_message
+            && item.contains_key("content")
+            && item
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.starts_with("msg_"))
+        {
+            item.shift_remove("id");
+        }
+        if !is_reasoning {
             continue;
         }
         // SDK 输出项的 status 不属于 Codex reasoning 输入合同；其他项的 status 可能合法。
