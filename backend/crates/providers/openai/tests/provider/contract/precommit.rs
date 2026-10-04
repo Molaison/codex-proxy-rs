@@ -157,7 +157,7 @@ async fn large_structural_events_preserve_overload_replay_past_the_old_grace_on_
 #[tokio::test]
 async fn later_structural_events_do_not_extend_grace_and_late_overload_is_not_replayable() {
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_provider_contract").await;
+    use provider_openai::credential::ResponsesTransport;
     let created = sse(&structural_event("response.created", 38_781));
     let progress = sse(&structural_event("response.in_progress", 38_785));
     let expected_bytes = created.len() + progress.len();
@@ -175,6 +175,7 @@ async fn later_structural_events_do_not_extend_grace_and_late_overload_is_not_re
         write_http_chunk(&mut socket, &sse(&overload())).await;
         socket.write_all(b"0\r\n\r\n").await.unwrap();
     });
+    store.seed_api_key("acct_provider_contract", base_url.clone(), ResponsesTransport::Http).await;
     let trace = TraceContext::new("req_precommit");
     let mut stream = provider_with_base_url(&store, base_url)
         .execute(
@@ -230,7 +231,7 @@ async fn immediate_release_preserves_wire_and_records_the_boundary_once() {
         ),
         (
             "byte_limit",
-            sse(&structural_event("response.created", 129 * 1024)),
+            sse(&structural_event("response.created", 1025 * 1024)),
         ),
         ("eof", sse(&structural_event("response.created", 512))),
     ] {
@@ -273,7 +274,7 @@ async fn immediate_release_preserves_wire_and_records_the_boundary_once() {
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0]["data"]["reason"], reason);
         if reason == "byte_limit" {
-            assert!(releases[0]["data"]["prefetchedBytes"].as_u64().unwrap() > 128 * 1024);
+            assert!(releases[0]["data"]["prefetchedBytes"].as_u64().unwrap() > 1024 * 1024);
         } else {
             assert_eq!(releases[0]["data"]["prefetchedBytes"], body.len());
         }

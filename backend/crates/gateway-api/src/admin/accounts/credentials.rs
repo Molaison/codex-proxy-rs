@@ -266,6 +266,7 @@ pub struct AccountConnectionUpdateRequest {
     pub base_url: Option<String>,
     pub transport: String,
     pub api_key: Option<String>,
+    pub request_local_retry: Option<bool>,
 }
 
 impl AccountConnectionUpdateRequest {
@@ -294,6 +295,12 @@ impl AccountConnectionUpdateRequest {
         }
         if let Some(key) = self.api_key {
             material.insert("api_key".to_owned(), Value::String(key));
+        }
+        if let Some(request_local_retry) = self.request_local_retry {
+            material.insert(
+                "request_local_retry".to_owned(),
+                Value::Bool(request_local_retry),
+            );
         }
         ProviderDocument::new(OpaqueProviderData::new(material))
     }

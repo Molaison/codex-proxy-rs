@@ -1350,6 +1350,8 @@ fn contract_account_scope() -> Arc<FrozenAccountScope> {
         "acct_unknown_continuation",
         "acct_unknown_turn_state",
         "acct_prefetch_limit",
+        "acct_request_local_retry_off",
+        "acct_request_local_retry_on",
         "acct_presentation",
         "acct_provider_contract",
         "acct_scope_new",
@@ -7726,6 +7728,164 @@ async fn responses_should_observe_and_bill_the_outbound_service_tier_on_both_tra
 }
 
 #[tokio::test]
+async fn api_key_request_local_retry_keeps_80_kib_prefix_atomic_and_uses_five_retries() {
+    use gateway_core::error::PreDeliveryRetry;
+    use provider_openai::credential::ResponsesTransport;
+
+    let padding = "x".repeat(80 * 1024);
+    let body = format!(
+        "event: response.created\ndata: {}\n\nevent: response.failed\ndata: {}\n\n",
+        json!({
+            "type": "response.created",
+            "response": {
+                "id": "resp_request_local_retry",
+                "model": "gpt-5.4",
+                "status": "in_progress",
+                "padding": padding,
+            }
+        }),
+        json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_request_local_retry",
+                "status": "failed",
+                "error": {
+                    "type": "too_many_requests",
+                    "code": "rate_limit_exceeded",
+                    "message": "retry this request locally"
+                }
+            }
+        })
+    );
+    assert!(body.len() > 80 * 1024 && body.len() < 1024 * 1024);
+
+    for enabled in [false, true] {
+        let account_id = if enabled {
+            "acct_request_local_retry_on"
+        } else {
+            "acct_request_local_retry_off"
+        };
+        let store = Arc::new(MemoryAccountStore::default());
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body.clone()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        store
+            .seed_api_key(account_id, server.uri(), ResponsesTransport::Http)
+            .await;
+        store.set_api_key_request_local_retry(account_id, enabled);
+
+        let mut stream = provider_with_base_url(&store, server.uri())
+            .execute(
+                planned_request("openai", http_generate_operation()),
+                context(
+                    &format!("req_request_local_retry_{enabled}"),
+                    CancellationToken::new(),
+                ),
+            )
+            .await
+            .expect("prepare provider stream");
+        let mut visible_before_error = 0;
+        let failure = loop {
+            match stream.next().await {
+                Some(Ok(event)) => visible_before_error += usize::from(event.has_client_event()),
+                Some(Err(error)) => break error,
+                None => panic!("response.failed must produce a typed failure"),
+            }
+        };
+
+        assert_eq!(visible_before_error, 0);
+        assert_eq!(failure.send_state(), UpstreamSendState::Sent);
+        assert!(failure.replay_is_safe());
+        match (enabled, failure.pre_delivery_retry()) {
+            (
+                true,
+                Some(PreDeliveryRetry::SameAccountTransientRetry {
+                    max_retries,
+                    initial_delay,
+                    max_delay,
+                }),
+            ) => {
+                assert_eq!(max_retries.get(), 5);
+                assert_eq!(initial_delay, Duration::from_millis(500));
+                assert_eq!(max_delay, Duration::from_secs(60));
+            }
+            (false, None) => {}
+            state => panic!("unexpected request-local retry state: {state:?}"),
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn api_key_request_local_retry_covers_explicit_http_transient_statuses() {
+    use gateway_core::error::PreDeliveryRetry;
+    use provider_openai::credential::ResponsesTransport;
+
+    for status in [429, 500, 502, 503, 504, 520, 521, 522, 523, 524] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("content-type", "application/json")
+                    .insert_header("retry-after", "120")
+                    .set_body_json(json!({"error":{"message":"temporary upstream rejection"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        store
+            .seed_api_key(
+                "acct_atomic_failure",
+                server.uri(),
+                ResponsesTransport::Http,
+            )
+            .await;
+        store.set_api_key_request_local_retry("acct_atomic_failure", true);
+
+        let mut stream = provider_with_base_url(&store, server.uri())
+            .execute(
+                planned_request("openai", http_generate_operation()),
+                context(
+                    &format!("req_request_local_retry_http_{status}"),
+                    CancellationToken::new(),
+                ),
+            )
+            .await
+            .expect("prepare provider stream");
+        let failure = loop {
+            match stream.next().await {
+                Some(Ok(event)) => assert!(!event.has_client_event()),
+                Some(Err(error)) => break error,
+                None => panic!("HTTP rejection must fail"),
+            }
+        };
+        match failure.pre_delivery_retry() {
+            Some(PreDeliveryRetry::SameAccountTransientRetry {
+                max_retries,
+                initial_delay,
+                max_delay,
+            }) => {
+                assert_eq!(max_retries.get(), 5, "status={status}");
+                assert_eq!(initial_delay, Duration::from_secs(60), "status={status}");
+                assert_eq!(max_delay, Duration::from_secs(60), "status={status}");
+            }
+            retry => panic!("status={status} missing local retry: {retry:?}"),
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
 async fn response_failed_before_semantic_output_is_atomic_and_persists_quota_lock() {
     let store = Arc::new(MemoryAccountStore::default());
     let account_id = "acct_atomic_failure";
@@ -7783,6 +7943,55 @@ async fn response_failed_before_semantic_output_is_atomic_and_persists_quota_loc
     let _ = release.send(());
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn request_local_retry_does_not_retry_structured_insufficient_quota() {
+    use provider_openai::credential::ResponsesTransport;
+
+    let account_id = "acct_atomic_failure";
+    let store = Arc::new(MemoryAccountStore::default());
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "error": {
+                        "type": "insufficient_quota",
+                        "code": "insufficient_quota",
+                        "message": "quota exhausted"
+                    }
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    store
+        .seed_api_key(account_id, server.uri(), ResponsesTransport::Http)
+        .await;
+    store.set_api_key_request_local_retry(account_id, true);
+
+    let mut stream = provider_with_base_url(&store, server.uri())
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_request_local_retry_quota", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare provider stream");
+    let failure = loop {
+        match stream.next().await {
+            Some(Ok(event)) => assert!(!event.has_client_event()),
+            Some(Err(error)) => break error,
+            None => panic!("quota response must fail"),
+        }
+    };
+    // HTTP 429 is intentionally diagnosed as RateLimited first; the structured
+    // insufficient_quota code must still deny the request-local replay budget.
+    assert_eq!(failure.kind(), ProviderErrorKind::RateLimited);
+    assert!(failure.pre_delivery_retry().is_none());
+    server.verify().await;
 }
 
 #[tokio::test]
@@ -8026,7 +8235,7 @@ async fn capacity_http_and_websocket_opening_rejections_use_bounded_business_ret
             assert!(
                 matches!(error.pre_delivery_retry(), Some(PreDeliveryRetry::SameAccountTransientRetry {
                 max_retries, initial_delay, max_delay,
-            }) if max_retries.get() == 3 && initial_delay == Duration::from_secs(8) && max_delay == Duration::from_secs(8))
+            }) if max_retries.get() == 5 && initial_delay == Duration::from_secs(60) && max_delay == Duration::from_secs(60))
             );
             assert!(provider_openai::openai_failure_affects_account_score(
                 &error
@@ -8106,16 +8315,16 @@ fn provider_with_capacity_tracking(
 }
 
 #[tokio::test]
-async fn capacity_feedback_only_counts_overload_rejections_and_excludes_diagnostic_probes() {
+async fn request_local_retry_does_not_record_capacity_feedback_for_opening_rejections() {
     use gateway_core::provider_ports::ProviderCooldownPort as _;
 
     for websocket in [false, true] {
-        for (status, code, capacity) in [
-            (429, "slow_down", true),
-            (503, "server_is_overloaded", true),
-            (500, "server_error", false),
-            (502, "server_error", false),
-            (503, "service_unavailable_error", false),
+        for (status, code) in [
+            (429, "slow_down"),
+            (503, "server_is_overloaded"),
+            (500, "server_error"),
+            (502, "server_error"),
+            (503, "service_unavailable_error"),
         ] {
             for diagnostic in [false, true] {
                 let store = Arc::new(MemoryAccountStore::default());
@@ -8179,17 +8388,10 @@ async fn capacity_feedback_only_counts_overload_rejections_and_excludes_diagnost
                         "unexpected upstream error: {error:?}"
                     );
                     let after = cooldowns.capacity_evidence(account.id());
-                    if diagnostic || !capacity {
-                        assert_eq!(
-                            after, before,
-                            "only explicit overload from ordinary requests may change capacity evidence: {status}/{code}"
-                        );
-                    } else {
-                        assert_eq!(
-                            after.map(|(count, _)| count),
-                            Some(before.map_or(1, |(count, _)| count + 1))
-                        );
-                    }
+                    assert_eq!(
+                        after, before,
+                        "request-local retry must not change capacity evidence: {status}/{code}"
+                    );
                 }
             }
         }
@@ -8282,8 +8484,8 @@ async fn websocket_usage_limit_rejection_preserves_quota_state_for_account_rotat
 }
 
 #[tokio::test]
-async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
-    use gateway_core::provider_ports::{ProviderCooldownKind, ProviderCooldownPort as _};
+async fn request_local_retry_preserves_capacity_evidence_and_semantic_output_boundary() {
+    use gateway_core::provider_ports::ProviderCooldownPort as _;
 
     for (use_websocket, (code, message, expected_kind, scored)) in
         [false, true].into_iter().flat_map(|websocket| {
@@ -8405,45 +8607,33 @@ async fn capacity_feedback_in_stream_only_counts_explicit_overload() {
                     None => panic!("expected upstream failure"),
                 }
             };
-            let capacity = expected_kind == ProviderErrorKind::UpstreamCapacityUnavailable;
+            let transient = expected_kind == ProviderErrorKind::UpstreamCapacityUnavailable
+                || code == "server_error";
             assert_eq!(
                 error.kind(),
                 expected_kind,
                 "unexpected error for {code}, websocket={use_websocket}, semantic_output={semantic_output}: {error:?}"
             );
-            assert_eq!(error.replay_is_safe(), capacity && !semantic_output);
+            assert_eq!(error.replay_is_safe(), transient && !semantic_output);
             assert_eq!(error.upstream_status(), None);
             assert_eq!(
                 error.pre_delivery_retry().is_some(),
-                capacity && !semantic_output
+                transient && !semantic_output
             );
             assert_eq!(
                 provider_openai::openai_failure_affects_account_score(&error),
                 scored
             );
             let cooldown = cooldowns.read(account.id()).await.expect("read cooldown");
-            if capacity {
-                assert_eq!(
-                    cooldowns
-                        .capacity_evidence(account.id())
-                        .map(|(count, _)| count),
-                    Some(12)
-                );
-                assert_eq!(
-                    cooldown.expect("capacity cooldown").kind(),
-                    ProviderCooldownKind::CapacityFreezeProbe
-                );
-            } else {
-                assert_eq!(
-                    cooldowns.capacity_evidence(account.id()),
-                    before,
-                    "non-capacity error {code} changed capacity evidence"
-                );
-                assert!(
-                    cooldown.is_none(),
-                    "non-capacity error {code} froze the account"
-                );
-            }
+            assert_eq!(
+                cooldowns.capacity_evidence(account.id()),
+                before,
+                "request-local retry changed capacity evidence for {code}"
+            );
+            assert!(
+                cooldown.is_none(),
+                "request-local retry froze the account for {code}"
+            );
             assert_eq!(
                 serde_json::from_str::<Value>(
                     error.raw_upstream_error().expect("raw error").as_str()
@@ -8557,7 +8747,7 @@ async fn ordinary_request_should_hold_created_until_later_failure_can_rotate() {
 #[tokio::test]
 async fn ordinary_request_should_bound_structural_event_replay_grace() {
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_bounded_replay_grace").await;
+    use provider_openai::credential::ResponsesTransport;
     let (base_url, release, _first_chunk_sent, server) = paused_chunked_sse_server(
         concat!(
             "event: response.created\n",
@@ -8567,6 +8757,7 @@ async fn ordinary_request_should_bound_structural_event_replay_grace() {
         String::new(),
     )
     .await;
+    store.seed_api_key("acct_bounded_replay_grace", base_url.clone(), ResponsesTransport::Http).await;
     let mut stream = provider_with_base_url(&store, base_url)
         .execute(
             planned_request("openai", http_generate_operation()),
@@ -9089,10 +9280,11 @@ async fn exact_websocket_busy_then_replay_scope_relaxation_is_rejected_before_se
 }
 
 #[tokio::test]
-async fn continuation_prefetch_over_128_kib_should_commit_wire_without_protocol_failure() {
+async fn continuation_prefetch_over_1_mib_should_commit_wire_without_protocol_failure() {
+    use provider_openai::credential::ResponsesTransport;
+
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_prefetch_limit").await;
-    let padding = "x".repeat(128 * 1024);
+    let padding = "x".repeat(1024 * 1024);
     let body = format!(
         "event: response.created\ndata: {}\n\n",
         json!({
@@ -9105,9 +9297,17 @@ async fn continuation_prefetch_over_128_kib_should_commit_wire_without_protocol_
             }
         })
     );
-    assert!(body.len() > 128 * 1024);
+    assert!(body.len() > 1024 * 1024);
     let (base_url, release, _first_chunk_sent, server) =
         paused_chunked_sse_server(body, String::new()).await;
+    store
+        .seed_api_key(
+            "acct_prefetch_limit",
+            base_url.clone(),
+            ResponsesTransport::Http,
+        )
+        .await;
+    store.set_api_key_request_local_retry("acct_prefetch_limit", true);
     let mut stream = provider_with_base_url(&store, base_url)
         .execute(
             planned_request("openai", http_generate_operation()),
@@ -9140,11 +9340,12 @@ async fn continuation_prefetch_over_128_kib_should_commit_wire_without_protocol_
 
 #[tokio::test]
 async fn response_failed_after_semantic_output_is_exposed_and_not_replay_safe() {
+    use provider_openai::credential::ResponsesTransport;
+
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_semantic_failure").await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/codex/responses"))
+        .and(path("/responses"))
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
@@ -9161,6 +9362,14 @@ async fn response_failed_after_semantic_output_is_exposed_and_not_replay_safe() 
         )
         .mount(&server)
         .await;
+    store
+        .seed_api_key(
+            "acct_semantic_failure",
+            server.uri(),
+            ResponsesTransport::Http,
+        )
+        .await;
+    store.set_api_key_request_local_retry("acct_semantic_failure", true);
     let mut stream = provider_with_base_url(&store, server.uri())
         .execute(
             planned_request("openai", http_generate_operation()),
@@ -9181,6 +9390,7 @@ async fn response_failed_after_semantic_output_is_exposed_and_not_replay_safe() 
         }
     };
 
+    assert!(failure.pre_delivery_retry().is_none());
     assert_eq!(
         wire_types,
         vec![
@@ -12225,5 +12435,57 @@ async fn public_catalog_filters_each_api_account_before_union_without_gating_inf
                 .collect::<Vec<_>>(),
             ["gpt-5.4", "gpt-public"]
         );
+    }
+}
+
+#[tokio::test]
+async fn request_local_retry_holds_delayed_overload_before_semantic_output() {
+    use gateway_core::error::PreDeliveryRetry;
+    use provider_openai::credential::ResponsesTransport;
+
+    for (oauth, code) in [(true, "server_is_overloaded"), (true, "server_error"), (false, "server_is_overloaded")] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account_id = "acct_request_local_retry_on";
+        let (base_url, release, first_chunk_sent, server) = paused_chunked_sse_server(
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_delayed_overload\",\"model\":\"gpt-5.4\",\"status\":\"in_progress\"}}\n\n".to_owned(),
+            format!("event: error\ndata: {}\n\n", json!({"type":"error", "error":{"code":code, "type":"service_unavailable_error", "message":"temporary capacity"}})),
+        ).await;
+        if oauth {
+            create_account(&store, account_id).await;
+        } else {
+            store.seed_api_key(account_id, base_url.clone(), ResponsesTransport::Http).await;
+            store.set_api_key_request_local_retry(account_id, true);
+        }
+        let mut stream = provider_with_base_url(&store, base_url)
+            .execute(
+                planned_request("openai", http_generate_operation()),
+                context("req_delayed_overload", CancellationToken::new()),
+            ).await.expect("prepare provider stream");
+        let mut sent = Box::pin(first_chunk_sent);
+        loop {
+            tokio::select! {
+                result = &mut sent => { result.expect("prefix sent"); break; }
+                event = stream.next() => {
+                    assert!(!event.expect("stream open").expect("event").has_client_event());
+                }
+            }
+        }
+        let exposed = timeout(Duration::from_millis(2800), async {
+            loop {
+                let event = stream.next().await.expect("stream open").expect("event");
+                if event.has_client_event() { return; }
+            }
+        }).await;
+        assert!(exposed.is_err(), "prefix must remain replayable beyond upstream 2.5s grace");
+        release.send(()).expect("release overload");
+        let failure = loop {
+            match stream.next().await.expect("overload event") {
+                Ok(event) => assert!(!event.has_client_event()),
+                Err(error) => break error,
+            }
+        };
+        assert!(failure.replay_is_safe());
+        assert!(matches!(failure.pre_delivery_retry(), Some(PreDeliveryRetry::SameAccountTransientRetry { .. })));
+        server.await.expect("upstream server");
     }
 }

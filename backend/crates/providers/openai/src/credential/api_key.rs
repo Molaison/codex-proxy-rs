@@ -16,6 +16,8 @@ pub struct ApiKeyConfiguration {
     pub base_url: String,
     #[serde(default)]
     pub transport: ResponsesTransport,
+    #[serde(default)]
+    pub request_local_retry: bool,
 }
 
 impl ApiKeyConfiguration {
@@ -35,6 +37,12 @@ pub struct ApiKeyCredentialData {
     pub base_url: String,
     #[serde(default)]
     pub transport: ResponsesTransport,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub request_local_retry: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ApiKeyCredentialData {
@@ -42,6 +50,7 @@ impl ApiKeyCredentialData {
         ApiKeyConfiguration {
             base_url: self.base_url.clone(),
             transport: self.transport,
+            request_local_retry: self.request_local_retry,
         }
     }
 

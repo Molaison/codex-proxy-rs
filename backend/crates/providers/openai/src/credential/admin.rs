@@ -258,6 +258,7 @@ struct CodexCprApiKeyExportAccount {
     base_url: String,
     api_key: String,
     transport: ResponsesTransport,
+    request_local_retry: bool,
 }
 
 #[derive(Serialize)]
@@ -455,6 +456,7 @@ impl CodexCredentialAdmin {
             base_url: String,
             transport: ResponsesTransport,
             api_key: Option<String>,
+            request_local_retry: Option<bool>,
         }
         let rotation: Rotation = serde_json::from_value(material)
             .map_err(|_| CodexCredentialAdminError::InvalidInput)?;
@@ -468,6 +470,9 @@ impl CodexCredentialAdmin {
         data.transport = rotation.transport;
         if let Some(api_key) = rotation.api_key {
             data.api_key = api_key;
+        }
+        if let Some(request_local_retry) = rotation.request_local_retry {
+            data.request_local_retry = request_local_retry;
         }
         let credential = CodexCredentialCodec::encode_complete(CodexCredentialData::ApiKey(data))
             .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
@@ -698,6 +703,7 @@ impl CodexCredentialAdmin {
                         base_url: data.base_url,
                         api_key: data.api_key,
                         transport: data.transport,
+                        request_local_retry: data.request_local_retry,
                     })
                 }
 
@@ -1544,6 +1550,16 @@ fn parse_api_key_import(value: &Value) -> Result<ApiKeyCredentialData, CodexCred
             .transpose()
             .map_err(|_| CodexCredentialAdminError::InvalidInput)?
             .unwrap_or_default(),
+        request_local_retry: credentials
+            .get("request_local_retry")
+            .or_else(|| credentials.get("requestLocalRetry"))
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or(CodexCredentialAdminError::InvalidInput)
+            })
+            .transpose()?
+            .unwrap_or(false),
     };
     if !data.validate() {
         return Err(CodexCredentialAdminError::InvalidCredential);

@@ -2509,6 +2509,7 @@ async fn api_key_admin_exposes_only_configuration_and_preserves_key_when_rotatin
             provider_openai::credential::ResponsesTransport::Http,
         )
         .await;
+    store.set_api_key_request_local_retry("acct_api_admin", true);
     let account = store.account("acct_api_admin").unwrap();
     let config = valid_config();
     let bundle = provider_openai::initialize(
@@ -2524,7 +2525,8 @@ async fn api_key_admin_exposes_only_configuration_and_preserves_key_when_rotatin
         .unwrap()
         .unwrap();
     let configuration = configuration.expose_to_provider().expose_to_provider();
-    assert_eq!(configuration.len(), 2);
+    assert_eq!(configuration.len(), 3);
+    assert_eq!(configuration.get("request_local_retry"), Some(&json!(true)));
     assert_eq!(
         configuration.get("base_url"),
         Some(&json!("https://first.example/v1"))
@@ -2548,12 +2550,41 @@ async fn api_key_admin_exposes_only_configuration_and_preserves_key_when_rotatin
         .expose_to_provider()
         .expose_to_provider();
     assert_eq!(material.get("api_key"), Some(&json!("sk-api-test-only")));
+    assert_eq!(material.get("request_local_retry"), Some(&json!(true)));
     assert_eq!(
         material.get("base_url"),
         Some(&json!("https://second.example/root"))
     );
     assert!(!prepared.facts().has_refresh_token);
     assert_eq!(prepared.facts().account_id, *account.id());
+    for enabled in [false, true] {
+        let prepared = admin
+            .prepare_rotation(PrepareCredentialRotation {
+                account: account_record(&account),
+                provider_material: ProviderDocument::new(OpaqueProviderData::new(
+                    json!({
+                        "base_url": "https://second.example/root",
+                        "transport": "http",
+                        "request_local_retry": enabled
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                )),
+            })
+            .await
+            .unwrap();
+        let material = prepared
+            .facts()
+            .provider_material
+            .expose_to_provider()
+            .expose_to_provider();
+        assert_eq!(material.get("api_key"), Some(&json!("sk-api-test-only")));
+        assert_eq!(
+            material.get("request_local_retry").and_then(Value::as_bool),
+            enabled.then_some(true)
+        );
+    }
     assert_eq!(
         admin
             .prepare_refresh(PrepareCredentialRefresh {

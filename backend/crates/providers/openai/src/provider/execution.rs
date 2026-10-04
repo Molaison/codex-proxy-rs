@@ -692,6 +692,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     Box::pin(async_stream::try_stream! {
         let cyber_policy_scope = lease.cyber_policy_scope().cloned();
         let allows_account_state_mutation = lease.allows_account_state_mutation();
+        let request_local_retry = lease.authentication().request_local_retry();
         let failure_context = OpenAiFailureContext {
             client: &client,
             selector: &selector,
@@ -755,7 +756,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let response = response.map_err(map_handshake_attempt_error);
         let response = match response {
             Ok(response) => response,
-            Err(mut failure) => {
+            Err(failure) => {
+                let mut failure = failure.apply_request_local_retry(
+                    request_local_retry,
+                    ReplayBoundary::BeforeSemanticOutput,
+                );
                 if let Some(policy) = websocket_failure_policy {
                     apply_websocket_recovery_policy(
                         &mut failure,
@@ -869,7 +874,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             .with_requested_service_tier(request.service_tier())
             .with_request_tool_pricing(upstream_model.as_str(), request.tools())
             .with_raw_sse_passthrough();
-        let mut pre_commit_events = PreCommitClientEvents::new(trace);
+        let mut pre_commit_events = PreCommitClientEvents::new(trace, request_local_retry);
         loop {
             if context.deadline().is_elapsed() {
                 if allows_account_state_mutation {
@@ -919,7 +924,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     }
                     continue;
                 }
-                Err(mut failure) => {
+                Err(failure) => {
+                    let replay_boundary =
+                        ReplayBoundary::from_semantic_output(pre_commit_events.is_committed());
+                    let mut failure = failure
+                        .apply_request_local_retry(request_local_retry, replay_boundary);
                     let updates = take_rate_limit_updates(rate_limit_updates.as_ref()).await;
                     let rate_limits_changed = if updates.is_empty() {
                         false
@@ -1041,6 +1050,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         ReplayBoundary::from_semantic_output(
                             semantic_output_seen || pre_commit_events.is_committed(),
                         ),
+                        request_local_retry,
                     ),
                     atomic_upstream_failure,
                 )
@@ -1161,6 +1171,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     ReplayBoundary::from_semantic_output(
                         semantic_output_seen || pre_commit_events.is_committed(),
                     ),
+                    request_local_retry,
                 ),
                 atomic_upstream_failure,
             )

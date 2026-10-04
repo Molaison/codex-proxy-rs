@@ -250,6 +250,50 @@ impl CodexUpstreamFailure {
         }
     }
 
+    pub(crate) fn request_local_retry_delay(&self) -> Option<std::time::Duration> {
+        let code = normalized(self.code.as_deref());
+        let error_type = normalized(self.client_error_type.as_deref());
+        let structured = [code.as_str(), error_type.as_str()];
+        if structured.into_iter().any(|value| {
+            is_quota_signal(value)
+                || is_usage_limit_signal(value)
+                || is_expired_credential(value)
+                || is_identity_verification_required(value)
+                || is_banned_account(value)
+        }) || matches!(
+            self.category,
+            CodexFailureCategory::ModelUnsupported
+                | CodexFailureCategory::CredentialExpired
+                | CodexFailureCategory::IdentityVerificationRequired
+                | CodexFailureCategory::Banned
+                | CodexFailureCategory::UsageLimitExhausted
+                | CodexFailureCategory::QuotaExhausted
+                | CodexFailureCategory::InvalidRequest
+                | CodexFailureCategory::PermissionDenied
+        ) {
+            return None;
+        }
+        let retryable = self.category == CodexFailureCategory::CapacityUnavailable
+            || structured.into_iter().any(is_rate_limit_signal)
+            || structured.into_iter().any(|value| {
+                matches!(value, "server_error" | "service_unavailable_error")
+            })
+            || self.status.is_some_and(|status| {
+                matches!(
+                    status.as_u16(),
+                    429 | 500 | 502 | 503 | 504 | 520 | 521 | 522 | 523 | 524
+                )
+            });
+        retryable.then(|| {
+            self.retry_after_seconds
+                .map_or(
+                    std::time::Duration::from_millis(500),
+                    std::time::Duration::from_secs,
+                )
+                .min(std::time::Duration::from_secs(60))
+        })
+    }
+
     pub(crate) fn persistable_code(&self) -> Option<&'static str> {
         self.code
             .as_deref()

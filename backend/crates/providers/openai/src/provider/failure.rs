@@ -17,6 +17,12 @@ const OPENAI_ACCOUNT_SCORE_FAILURE_REASONS: &[&str] = &[
     "service_unavailable_error",
 ];
 
+// 429/容量拒绝通常是短时窗口，而不是凭据失效。请求内多等一会儿，
+// 避免客户端只看到 "exceeded retry limit" 就中断对话。
+const CAPACITY_TRANSIENT_MAX_RETRIES: u32 = 8;
+const CAPACITY_TRANSIENT_MAX_DELAY: Duration = Duration::from_secs(60);
+const REQUEST_LOCAL_TRANSIENT_MAX_RETRIES: u32 = 5;
+
 fn is_openai_account_score_failure_reason(value: &str) -> bool {
     let value = value.trim();
     OPENAI_ACCOUNT_SCORE_FAILURE_REASONS
@@ -50,6 +56,7 @@ pub(super) struct MappedProviderFailure {
     pub(super) rate_limit_headers: Vec<(String, String)>,
     pub(super) observation: Option<ProviderResponseObservation>,
     pub(super) capture_response_cookies: bool,
+    request_local_retry_delay: Option<Duration>,
 }
 
 impl MappedProviderFailure {
@@ -65,7 +72,31 @@ impl MappedProviderFailure {
             rate_limit_headers: Vec::new(),
             observation: None,
             capture_response_cookies: false,
+            request_local_retry_delay: None,
         }
+    }
+
+    pub(super) fn apply_request_local_retry(
+        mut self,
+        enabled: bool,
+        replay_boundary: ReplayBoundary,
+    ) -> Self {
+        let Some(initial_delay) = enabled.then_some(self.request_local_retry_delay).flatten()
+        else {
+            return self;
+        };
+        self.account_failure = None;
+        self.upstream_capacity_failure = false;
+        if replay_boundary.permits_provider_proof()
+            && self.error.send_state() != UpstreamSendState::Ambiguous
+        {
+            self.error = self.error.with_replay_safe().with_transient_retry(
+                NonZeroU32::new(REQUEST_LOCAL_TRANSIENT_MAX_RETRIES).unwrap_or(NonZeroU32::MIN),
+                initial_delay,
+                CAPACITY_TRANSIENT_MAX_DELAY,
+            );
+        }
+        self
     }
 }
 
@@ -84,14 +115,15 @@ pub(super) async fn wait_for_replay_grace(deadline: Option<Instant>) {
 
 /// 提交边界前的上游事件预取。
 ///
-/// 原始 chunk 计数而不是重编码后的 event 大小。时间与字节阈值共同限定无感换号
-/// 窗口；任一边界到达都会提交已缓存 wire，不能因网关私有资源规则伪造上游协议
-/// 失败。一旦提交，后续事件不再具备无痕重放资格。
+/// 原始 chunk 计数而不是重编码后的 event 大小。启用请求内重试时，前导事件
+/// 保留至真正输出、完成或 1 MiB 上限；等待受原请求 deadline 限制，HTTP 层以
+/// 注释保活。不启用重试的账号沿用短时间窗口；提交后不再具备无痕重放资格。
 pub(super) struct PreCommitClientEvents {
     pending: Vec<ProviderEvent>,
     prefetched_bytes: usize,
     replay_grace_started_at: Option<Instant>,
     committed: bool,
+    request_local_retry: bool,
     trace: TraceContext,
 }
 
@@ -106,12 +138,13 @@ pub(super) enum PreCommitReleaseReason {
 }
 
 impl PreCommitClientEvents {
-    pub(super) const fn new(trace: TraceContext) -> Self {
+    pub(super) const fn new(trace: TraceContext, request_local_retry: bool) -> Self {
         Self {
             pending: Vec::new(),
             prefetched_bytes: 0,
             replay_grace_started_at: None,
             committed: false,
+            request_local_retry,
             trace,
         }
     }
@@ -179,6 +212,9 @@ impl PreCommitClientEvents {
     }
 
     pub(super) fn replay_grace_deadline(&self) -> Option<Instant> {
+        if self.request_local_retry {
+            return None;
+        }
         self.replay_grace_started_at
             .and_then(|started| started.checked_add(STREAM_REPLAY_GRACE))
     }
@@ -814,6 +850,7 @@ pub(super) fn map_canonical_error(
     set_cookie_headers: &[String],
     rate_limit_headers: &[(String, String)],
     replay_boundary: ReplayBoundary,
+    request_local_retry: bool,
 ) -> MappedProviderFailure {
     match error {
         CodexCanonicalError::Protocol(error) => MappedProviderFailure::plain(error),
@@ -827,7 +864,8 @@ pub(super) fn map_canonical_error(
             ),
             None,
             replay_boundary,
-        ),
+        )
+        .apply_request_local_retry(request_local_retry, replay_boundary),
     }
 }
 
@@ -1333,6 +1371,7 @@ pub(super) fn map_upstream_failure(
 ) -> MappedProviderFailure {
     let category = failure.category();
     let capacity_unavailable = category == CodexFailureCategory::CapacityUnavailable;
+    let request_local_retry_delay = failure.request_local_retry_delay();
     let cyber_policy_failure = failure
         .status
         .is_some_and(|status| status.is_client_error())
@@ -1408,9 +1447,9 @@ pub(super) fn map_upstream_failure(
             );
     }
     if capacity_unavailable && error.replay_is_safe() {
-        let max_delay = Duration::from_secs(8);
+        let max_delay = CAPACITY_TRANSIENT_MAX_DELAY;
         error = error.with_transient_retry(
-            NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN),
+            NonZeroU32::new(CAPACITY_TRANSIENT_MAX_RETRIES).unwrap_or(NonZeroU32::MIN),
             failure
                 .retry_after_seconds
                 .map_or(Duration::from_millis(500), Duration::from_secs)
@@ -1462,6 +1501,7 @@ pub(super) fn map_upstream_failure(
             category,
             CodexFailureCategory::CloudflareChallenge | CodexFailureCategory::CloudflarePathBlocked
         ),
+        request_local_retry_delay,
     }
 }
 

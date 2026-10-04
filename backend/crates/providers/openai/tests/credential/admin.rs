@@ -850,7 +850,7 @@ async fn api_key_import_export_preserves_target_without_oauth_exchange() {
         runtime_policy(),
     );
     let imported = service.prepare_import_document(serde_json::json!({
-        "provider": "openai", "authentication_kind": "api_key", "name": "relay", "base_url": "https://relay.example/custom/v2", "api_key": "sk-test-only"
+        "provider": "openai", "authentication_kind": "api_key", "name": "relay", "base_url": "https://relay.example/custom/v2", "api_key": "sk-test-only", "request_local_retry": true
     })).await.expect("import API account").into_accounts().pop().expect("one account");
     assert_eq!(imported.account.authentication_kind(), "api_key");
     assert!(!imported.account.has_refresh_token());
@@ -875,6 +875,10 @@ async fn api_key_import_export_preserves_target_without_oauth_exchange() {
         .expect("export")
         .into_json()
         .expect("JSON");
+    assert_eq!(
+        document.pointer("/accounts/0/request_local_retry"),
+        Some(&serde_json::json!(true))
+    );
     let restored = service
         .prepare_import_document(document)
         .await
@@ -889,6 +893,26 @@ async fn api_key_import_export_preserves_target_without_oauth_exchange() {
     };
     assert_eq!(data.base_url, "https://relay.example/custom/v2");
     assert_eq!(data.api_key, "sk-test-only");
+    assert!(data.request_local_retry);
+    assert!(data.configuration().request_local_retry);
+    assert!(
+        CodexCredentialCodec::decode(&restored.credential)
+            .unwrap()
+            .authentication
+            .request_local_retry()
+    );
+    let mut rollback_compatible = data.clone();
+    rollback_compatible.request_local_retry = false;
+    let persisted =
+        serde_json::to_value(&rollback_compatible).expect("serialize API-key credential");
+    assert!(
+        persisted.get("request_local_retry").is_none(),
+        "disabled request_local_retry must be omitted for rollback compatibility"
+    );
+    let legacy: provider_openai::credential::ApiKeyCredentialData =
+        serde_json::from_value(persisted).expect("legacy credential without retry field");
+    assert!(!legacy.request_local_retry);
+    assert!(!legacy.configuration().request_local_retry);
     assert_eq!(
         data.transport,
         provider_openai::credential::ResponsesTransport::Http
