@@ -55,3 +55,10 @@ PostgreSQL 的临时 schema 测试连接使用异步提交，保留事务可见�
 启动配置的 48 位十六进制要求；仅能连接数据库并不代表该初始化合同通过。专用服务使用对应测试密码，
 并在测试进程中清除 `CPR_DATABASE_URL`、`CPR_REDIS_URL`、`CPR_DATABASE_PASSWORD` 和
 `CPR_REDIS_PASSWORD`，避免启动配置被部署环境覆盖
+
+## ywl 定制部署升级线
+
+本分支保留 ywl 已执行的 `0020_long_concurrency_wait.sql` 和
+`0021_plugin_trust.sql` 原始编号及字节；官方 v3.19 的 runtime scheduling
+作为 `0022_runtime_scheduling.sql` 追加。它不是官方20/21迁移历史的替代品。
+升级需使用本部署数据库的副本验收，不得改写 `_sqlx_migrations` 绕过校验。
