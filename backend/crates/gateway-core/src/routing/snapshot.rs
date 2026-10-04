@@ -935,6 +935,9 @@ impl RuntimeSnapshot {
         scope: &FrozenAccountScope,
     ) -> bool {
         let upstream_model = self.mapped_model(public_model.as_str());
+        if scope.explicitly_allows_provider_model(provider, &upstream_model) {
+            return true;
+        }
         match self
             .model_catalog_accounts
             .get(provider)

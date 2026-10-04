@@ -393,6 +393,20 @@ impl FrozenAccountScope {
             })
     }
 
+    /// Explicit model grants remain visible when another account supplies catalog metadata.
+    #[must_use]
+    pub(crate) fn explicitly_allows_provider_model(
+        &self,
+        provider: &ProviderKind,
+        upstream_model: &str,
+    ) -> bool {
+        self.directory.accounts.iter().any(|(id, account)| {
+            account.provider_kind() == provider
+                && account.model_access.mode() == super::AccountModelAccessMode::Allowlist
+                && self.allows_model(id, upstream_model)
+        })
+    }
+
     #[must_use]
     pub fn provider_kinds(&self) -> &BTreeSet<ProviderKind> {
         &self.provider_kinds
