@@ -55,8 +55,8 @@ const openaiGuardianReservedConcurrency = defineModel<string>('openaiGuardianRes
       <BaseFormItem label="账号队列容量" description="每个上游账号允许等待的最大请求数，0 表示不排队">
         <BaseInput v-model="maxWaitingPerAccount" aria-label="账号队列容量" type="number" min="0" max="1000" step="1" />
       </BaseFormItem>
-      <BaseFormItem label="排队超时（秒）" description="密钥队列与账号队列共用的等待时限，从首次入队起计时，1～120 秒">
-        <BaseInput v-model="concurrencyWaitTimeoutSeconds" aria-label="排队超时（秒）" type="number" min="1" max="120" step="1" />
+      <BaseFormItem label="排队超时（秒）" description="密钥队列与账号队列共用的等待时限，从首次入队起计时，1～3600 秒">
+        <BaseInput v-model="concurrencyWaitTimeoutSeconds" aria-label="排队超时（秒）" type="number" min="1" max="3600" step="1" />
       </BaseFormItem>
       <BaseFormItem label="自动审批预留并发" description="为 Codex 自动审批预留每账号名额，0 表示关闭">
         <template #label-extra>

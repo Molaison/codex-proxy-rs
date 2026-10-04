@@ -110,7 +110,7 @@ fn validate_settings(command: &ReplaceRuntimeSettings) -> Result<(), AdminError>
         && command.refresh_concurrency > 0
         && command.max_waiting_per_key <= 1_000
         && command.max_waiting_per_account <= 1_000
-        && (1..=120).contains(&command.concurrency_wait_timeout_seconds)
+        && (1..=3_600).contains(&command.concurrency_wait_timeout_seconds)
         && crate::model::retention::RetentionPolicy::try_new(
             command.usage_retention_days,
             command.ops_event_retention_days,

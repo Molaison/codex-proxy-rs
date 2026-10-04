@@ -181,9 +181,9 @@ onBeforeUnmount(() => {
       <template #body>
         <div class="space-y-3 p-4 text-sm">
           <p>模型、渠道、聊天/工具能力、effort、session 是五个独立维度。模型名、认证方式和管理能力不能证明工具可用。</p>
-          <p class="text-cp-text-secondary">渠道以真实账号名和认证类型展示；provider 是协议分类，不等于供应商。工具版 ChatGPT Web 的独立 CLI 不属于 CPR，本页不将其列为 CPR 工具渠道。</p>
+          <p class="text-cp-text-secondary">渠道以真实账号名和认证类型展示；provider 是协议分类，不等于供应商。ChatGPT Web 工具入口可能独立运行或经专用 CPR 渠道接入；是否有工具权限取决于渠道与 Key，不能仅凭模型 ID 判断。</p>
           <p>同一模型 ID（例如 gpt-6-astra）可在授权范围内的 OAuth 与 AnyRouter 账号间自动调度。模型映射只转换模型 ID，不锁定渠道；渠道选择仍由账号政策、Key 范围和调度决定。</p>
-          <p class="text-cp-text-secondary">本部署约定（非 API 实时能力声明）：chatgpt-web/* 是纯聊天；工具版为独立 codex-web-tools 入口，权限需单独授予。临时/持久保存与思考预算是不同设置，仅当前兼容客户端把保存模式后缀附在 effort 上。</p>
+          <p class="text-cp-text-secondary">本部署约定（非 API 实时能力声明）：既有姓名项目渠道用于纯聊天；工具版使用 codex-web-tools 或专用 CPR 测试渠道，权限需单独授予。临时/持久保存与思考预算是不同设置，仅当前兼容客户端把保存模式后缀附在 effort 上。</p>
           <nav aria-label="编辑配置" class="flex flex-wrap gap-4">
             <RouterLink to="/accounts">编辑账号与模型政策</RouterLink>
             <RouterLink to="/groups">编辑分组</RouterLink>

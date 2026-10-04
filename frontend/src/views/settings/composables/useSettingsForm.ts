@@ -233,8 +233,8 @@ export function useSettingsForm() {
       return
     }
     if (![maxWaitingPerKey, maxWaitingPerAccount].every(value => Number.isInteger(value) && value >= 0 && value <= 1000)
-      || !Number.isInteger(concurrencyWaitTimeoutSeconds) || concurrencyWaitTimeoutSeconds < 1 || concurrencyWaitTimeoutSeconds > 120) {
-      toast.warning('队列容量应为 0～1000 的整数，排队超时应为 1～120 秒的整数')
+      || !Number.isInteger(concurrencyWaitTimeoutSeconds) || concurrencyWaitTimeoutSeconds < 1 || concurrencyWaitTimeoutSeconds > 3600) {
+      toast.warning('队列容量应为 0～1000 的整数，排队超时应为 1～3600 秒的整数')
       return
     }
     if (minCodexDesktopVersionError.value || minCodexCliVersionError.value) {

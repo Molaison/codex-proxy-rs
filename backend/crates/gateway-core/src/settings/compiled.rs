@@ -22,7 +22,7 @@ impl CompiledSettings {
     pub(crate) fn new(settings: SettingsValues) -> Result<Self, InvalidSettings> {
         if settings.max_waiting_per_key > 1_000
             || settings.max_waiting_per_account > 1_000
-            || !(1..=120).contains(&settings.concurrency_wait_timeout_seconds)
+            || !(1..=3_600).contains(&settings.concurrency_wait_timeout_seconds)
         {
             return Err(InvalidSettings);
         }

@@ -178,7 +178,7 @@ impl RuntimeSettingsUpdate {
             || self.refresh_concurrency == 0
             || self.max_waiting_per_key > 1_000
             || self.max_waiting_per_account > 1_000
-            || !(1..=120).contains(&self.concurrency_wait_timeout_seconds)
+            || !(1..=3_600).contains(&self.concurrency_wait_timeout_seconds)
             || self.usage_retention_days < 31
             || self.ops_event_retention_days == 0
             || self.audit_retention_days == 0
