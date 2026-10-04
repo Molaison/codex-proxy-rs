@@ -143,7 +143,7 @@ impl UpdateRuntimeSettingsRequest {
                 "responsesMaxDecompressedBodyBytes",
             ));
         }
-        if !(1..=120).contains(&self.concurrency_wait_timeout_seconds) {
+        if !(1..=3_600).contains(&self.concurrency_wait_timeout_seconds) {
             return Err(WireValidationError::new("concurrencyWaitTimeoutSeconds"));
         }
         for (value, field) in [
