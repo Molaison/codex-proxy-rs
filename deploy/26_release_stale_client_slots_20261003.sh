@@ -41,7 +41,10 @@ log() {
   printf '%s\n' "$line"
 }
 
-started_at() { $PODMAN inspect --format '{{.State.StartedAt}}' "$CONTAINER" 2>/dev/null || true; }
+started_at() {
+  $PODMAN inspect "$CONTAINER" 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["State"]["StartedAt"])' 2>/dev/null || true
+}
 # 保留时间偏移；Podman StartedAt 与数据库都使用带时区时间。
 started_at_epoch() { date -d "$1" +%s 2>/dev/null; }
 healthz_code() { $CURL -s -m 5 -o /dev/null -w '%{http_code}' "$GATEWAY_URL" 2>/dev/null || true; }
