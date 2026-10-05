@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# ywl/zzp: bash ~/codex-proxy-rs/deploy/33_entry_diagnostics.sh tests|health|release
+# ywl/zzp: bash ~/codex-proxy-rs/.runtime/30_upstream_acceptance/source/deploy/33_entry_diagnostics.sh tests|health|catalog|release|image
 # Existing isolated builder only, locked release -j4. Never changes production.
 set -euo pipefail
 r=/home/zzp/codex-proxy-rs/.runtime/30_upstream_acceptance
 b=cpr-upstream30-build
 exec > >(tee -a "$r/entry-diagnostics-build.log") 2>&1
 date -Is
-case "${1:?tests|health|release}" in
+case "${1:?tests|health|catalog|release|image}" in
 tests)
  buildah copy "$b" "$r/source/backend" /app/backend >/dev/null
  buildah run --isolation chroot "$b" sh -ec '
@@ -23,7 +23,24 @@ health)
  cargo test --release --locked -j4 -p gateway-host --test main supervisor_uses_exponential_backoff_and_recovers_health -- --nocapture
  ' </dev/null
  ;;
+catalog)
+ buildah copy "$b" "$r/source/backend" /app/backend >/dev/null
+ buildah run --isolation chroot "$b" sh -ec '
+ export PATH=/usr/local/cargo/bin:$PATH; cd /app/backend
+ cargo test --release --locked -j4 -p provider-openai --test main plan_catalog_cache_is_shared_and_manual_refresh_replaces_it -- --nocapture
+ ' </dev/null
+ ;;
 release) bash /home/zzp/codex-proxy-rs/deploy/30_accept.sh backend ;;
-*) echo 'expected tests|health|release' >&2; exit 2;;
+image)
+ base=$(podman inspect cpr-iso-prodata_codex-proxy-rs_1 --format '{{.Image}}')
+ c=$(buildah from "$base")
+ buildah copy --chown 10001:10001 "$c" "$r/codex-proxy-rs" /app/bin/codex-proxy-rs >/dev/null
+ sha=$(cut -c1-8 "$r/binary-source.txt")
+ buildah config --label "io.molaison.acceptance=$sha" "$c"
+ buildah commit "$c" "localhost/cpr-ywl:3.19.0-acceptance-$sha"
+ printf 'localhost/cpr-ywl:3.19.0-acceptance-%s\n' "$sha" > "$r/image.txt"
+ buildah rm "$c" >/dev/null
+ ;;
+*) echo 'expected tests|health|catalog|release|image' >&2; exit 2;;
 esac
 date -Is
