@@ -6,7 +6,9 @@ use std::{
 };
 
 use bytes::Bytes;
-use gateway_core::error::{ProviderError, ProviderErrorKind};
+use gateway_core::error::{
+    ClientVisibleUpstreamError, ProviderDiagnostic, ProviderError, ProviderErrorKind,
+};
 use gateway_core::event::{
     ContentItem, ContentKind, FinishReason, GatewayEvent, ProtocolWireEvent, ProviderEvent,
     ReasoningDelta, ResponseMeta, TextDelta, ToolCallDelta,
@@ -47,6 +49,8 @@ pub struct CodexCanonicalDecoder {
     reasoning_output_seen: BTreeSet<u32>,
     usage_emitted: bool,
     semantic_output_seen: bool,
+    /// 真实 wire 上是否观察到 Responses 终态类型；独立于 canonical 投影是否成功。
+    terminal_event_seen: bool,
     requested_service_tier: Option<String>,
     response_service_tier: Option<String>,
     response_model: ResponseModelObservation,
@@ -156,6 +160,7 @@ impl CodexCanonicalDecoder {
             reasoning_output_seen: BTreeSet::new(),
             usage_emitted: false,
             semantic_output_seen: false,
+            terminal_event_seen: false,
             requested_service_tier: None,
             response_service_tier: None,
             response_model: ResponseModelObservation::default(),
@@ -210,20 +215,29 @@ impl CodexCanonicalDecoder {
 
     pub fn finish(&mut self) -> CodexCanonicalOutcome {
         self.timing_signals = ResponseEventSignals::default();
-        if self.raw_sse_passthrough {
+        let outcome = if self.raw_sse_passthrough {
             let frames = self.decoder.finish_frames();
-            return self.decode_frames(frames);
-        }
-        let events = match self.decoder.finish() {
-            Ok(events) => events,
-            Err(error) => {
-                return self.failure(
-                    Vec::new(),
-                    CodexCanonicalError::Protocol(protocol_error(error)),
-                );
+            self.decode_frames(frames)
+        } else {
+            match self.decoder.finish() {
+                Ok(events) => self.decode(events),
+                Err(error) => {
+                    return self.failure(
+                        Vec::new(),
+                        CodexCanonicalError::Protocol(protocol_error(error)),
+                    );
+                }
             }
         };
-        self.decode(events)
+        match outcome {
+            // 上游结束前没有真实终态：保留已产出的 wire 与 semantic_output_seen，
+            // 报明确 Protocol 失败；既不合成 completed，也不允许已输出后重放。
+            CodexCanonicalOutcome::Events(events) if !self.terminal_event_seen => self.failure(
+                events,
+                CodexCanonicalError::Protocol(ended_before_terminal_error()),
+            ),
+            outcome => outcome,
+        }
     }
 
     /// 取走最近一次解码中由原始 Responses 事件观察到的计时语义。
@@ -326,6 +340,15 @@ impl CodexCanonicalDecoder {
             // HTTP transport has already projected this control frame into local quota facts.
             // It must not become client output or start first-output timing.
             return Ok(());
+        }
+        // 终态只认 wire 事件类型：canonical 投影可能因未知字段形状放弃，
+        // 但上游确实发送过 response.completed/incomplete 时不算截断；
+        // 未知事件类型不能反过来猜成终态。
+        if matches!(
+            event_type,
+            Some("response.completed" | "response.incomplete")
+        ) {
+            self.terminal_event_seen = true;
         }
         self.observe_response_service_tier(&value);
         self.response_model.observe(event_type, &value);
@@ -1096,6 +1119,25 @@ fn incomplete_finish_reason(response: &Value) -> FinishReason {
 
 fn protocol_error(_error: impl std::fmt::Debug) -> ProviderError {
     protocol_error_marker()
+}
+
+/// 上游未发送 `response.completed`/`response.incomplete` 就结束时的稳定失败。
+///
+/// 该失败可能发生在已有真实输出之后，因此不可重放；客户端必须收到明确的上游
+/// 截断错误，而不是一个被静默补齐的成功结束。
+fn ended_before_terminal_error() -> ProviderError {
+    ProviderError::new(ProviderErrorKind::Protocol, UpstreamSendState::Sent)
+        .with_diagnostic(
+            ProviderDiagnostic::new(
+                "Codex Responses stream ended before a terminal response event",
+            )
+            .with_classification("receive", "ended_before_terminal"),
+        )
+        .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+            "upstream responses stream ended before a terminal event",
+            Some("upstream_stream_truncated".to_owned()),
+            Some("upstream_error".to_owned()),
+        ))
 }
 
 fn protocol_error_marker() -> ProviderError {

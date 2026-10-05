@@ -8754,10 +8754,21 @@ async fn ordinary_request_should_bound_structural_event_replay_grace() {
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_bounded_grace\",\"model\":\"gpt-5.4\",\"status\":\"in_progress\"}}\n\n"
         )
         .to_owned(),
-        String::new(),
+        // 上游只有发送真实终态才允许流干净结束。
+        concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bounded_grace\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[]}}\n\n"
+        )
+        .to_owned(),
     )
     .await;
-    store.seed_api_key("acct_bounded_replay_grace", base_url.clone(), ResponsesTransport::Http).await;
+    store
+        .seed_api_key(
+            "acct_bounded_replay_grace",
+            base_url.clone(),
+            ResponsesTransport::Http,
+        )
+        .await;
     let mut stream = provider_with_base_url(&store, base_url)
         .execute(
             planned_request("openai", http_generate_operation()),
@@ -9298,8 +9309,12 @@ async fn continuation_prefetch_over_1_mib_should_commit_wire_without_protocol_fa
         })
     );
     assert!(body.len() > 1024 * 1024);
+    let terminal = concat!(
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_prefetch_limit\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[]}}\n\n"
+    );
     let (base_url, release, _first_chunk_sent, server) =
-        paused_chunked_sse_server(body, String::new()).await;
+        paused_chunked_sse_server(body, terminal.to_owned()).await;
     store
         .seed_api_key(
             "acct_prefetch_limit",
@@ -12443,7 +12458,11 @@ async fn request_local_retry_holds_delayed_overload_before_semantic_output() {
     use gateway_core::error::PreDeliveryRetry;
     use provider_openai::credential::ResponsesTransport;
 
-    for (oauth, code) in [(true, "server_is_overloaded"), (true, "server_error"), (false, "server_is_overloaded")] {
+    for (oauth, code) in [
+        (true, "server_is_overloaded"),
+        (true, "server_error"),
+        (false, "server_is_overloaded"),
+    ] {
         let store = Arc::new(MemoryAccountStore::default());
         let account_id = "acct_request_local_retry_on";
         let (base_url, release, first_chunk_sent, server) = paused_chunked_sse_server(
@@ -12453,14 +12472,18 @@ async fn request_local_retry_holds_delayed_overload_before_semantic_output() {
         if oauth {
             create_account(&store, account_id).await;
         } else {
-            store.seed_api_key(account_id, base_url.clone(), ResponsesTransport::Http).await;
+            store
+                .seed_api_key(account_id, base_url.clone(), ResponsesTransport::Http)
+                .await;
             store.set_api_key_request_local_retry(account_id, true);
         }
         let mut stream = provider_with_base_url(&store, base_url)
             .execute(
                 planned_request("openai", http_generate_operation()),
                 context("req_delayed_overload", CancellationToken::new()),
-            ).await.expect("prepare provider stream");
+            )
+            .await
+            .expect("prepare provider stream");
         let mut sent = Box::pin(first_chunk_sent);
         loop {
             tokio::select! {
@@ -12473,10 +12496,16 @@ async fn request_local_retry_holds_delayed_overload_before_semantic_output() {
         let exposed = timeout(Duration::from_millis(2800), async {
             loop {
                 let event = stream.next().await.expect("stream open").expect("event");
-                if event.has_client_event() { return; }
+                if event.has_client_event() {
+                    return;
+                }
             }
-        }).await;
-        assert!(exposed.is_err(), "prefix must remain replayable beyond upstream 2.5s grace");
+        })
+        .await;
+        assert!(
+            exposed.is_err(),
+            "prefix must remain replayable beyond upstream 2.5s grace"
+        );
         release.send(()).expect("release overload");
         let failure = loop {
             match stream.next().await.expect("overload event") {
@@ -12485,7 +12514,10 @@ async fn request_local_retry_holds_delayed_overload_before_semantic_output() {
             }
         };
         assert!(failure.replay_is_safe());
-        assert!(matches!(failure.pre_delivery_retry(), Some(PreDeliveryRetry::SameAccountTransientRetry { .. })));
+        assert!(matches!(
+            failure.pre_delivery_retry(),
+            Some(PreDeliveryRetry::SameAccountTransientRetry { .. })
+        ));
         server.await.expect("upstream server");
     }
 }

@@ -119,6 +119,7 @@ impl CodexBackendClient {
         // 直接透传给 Codex，否则上游会以 400 拒绝非流式请求。
         let mut upstream_body = upstream_request.body().clone();
         upstream_body.insert("stream".to_owned(), serde_json::Value::Bool(true));
+        normalize_anyrouter_forced_tool_choice(&mut upstream_body, self.protocol, &self.base_url);
         let body =
             serde_json::to_vec(&upstream_body).map_err(CodexClientError::RequestBodyEncode)?;
         let endpoint = endpoint_url(&self.base_url, self.protocol.responses_path());
@@ -769,5 +770,92 @@ async fn append_http_sse_rate_limit_updates(
     }
     if !observations.is_empty() {
         updates.lock().await.extend(observations);
+    }
+}
+
+// AnyRouter 的具名函数分支缺少响应终态；限制为单一必选函数且关闭并行调用，
+// 保留强制调用语义，同时使用能返回完整终态的上游分支。
+fn normalize_anyrouter_forced_tool_choice(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    protocol: OpenAiUpstreamProtocol,
+    base_url: &str,
+) {
+    use serde_json::{Value, json};
+
+    if protocol != OpenAiUpstreamProtocol::ResponsesApi
+        || !reqwest::Url::parse(base_url).is_ok_and(|url| url.host_str() == Some("anyrouter.top"))
+    {
+        return;
+    }
+    let Some(choice) = body.get("tool_choice") else { return };
+    if choice.get("type").and_then(Value::as_str) != Some("function") {
+        return;
+    }
+    let Some(name) = choice.get("name").and_then(Value::as_str) else { return };
+    let Some(tools) = body.get("tools").and_then(Value::as_array) else { return };
+    let mut matching = tools.iter().filter(|tool| {
+        tool.get("type").and_then(Value::as_str) == Some("function")
+            && tool.get("name").and_then(Value::as_str) == Some(name)
+    });
+    let Some(tool) = matching.next().cloned() else { return };
+    // 非法选择仍交由上游验证，不能在兼容转换中默默修复。
+    if matching.next().is_some() {
+        return;
+    }
+    body.insert("tools".to_owned(), json!([tool]));
+    body.insert("tool_choice".to_owned(), json!("required"));
+    body.insert("parallel_tool_calls".to_owned(), json!(false));
+}
+
+#[cfg(test)]
+mod anyrouter_forced_tool_tests {
+    use super::{OpenAiUpstreamProtocol, normalize_anyrouter_forced_tool_choice};
+    use serde_json::json;
+
+    #[test]
+    fn anyrouter_forced_tool_preserves_exact_function_and_unrelated_fields() {
+        let target = json!({"type":"function","name":"echo_marker","strict":true,
+            "parameters":{"type":"object","properties":{"marker":{"type":"string"}},
+                "required":["marker"],"additionalProperties":false}});
+        let original = json!({"model":"gpt-6-astra","input":[{"role":"user","content":"marker"}],
+            "reasoning":{"effort":"high"},"stream":true,"store":false,
+            "tool_choice":{"type":"function","name":"echo_marker"},"parallel_tool_calls":true,
+            "tools":[{"type":"function","name":"other","parameters":{}},target.clone()]});
+        let mut body = original.as_object().unwrap().clone();
+        normalize_anyrouter_forced_tool_choice(&mut body, OpenAiUpstreamProtocol::ResponsesApi,
+            "https://anyrouter.top/v1");
+        let mut expected = original;
+        expected["tools"] = json!([target]);
+        expected["tool_choice"] = json!("required");
+        expected["parallel_tool_calls"] = json!(false);
+        assert_eq!(json!(body), expected);
+    }
+
+    #[test]
+    fn anyrouter_forced_tool_leaves_other_upstreams_and_oauth_unchanged() {
+        let original = json!({"tool_choice":{"type":"function","name":"echo"},
+            "tools":[{"type":"function","name":"echo","parameters":{}}]});
+        for (protocol, url) in [
+            (OpenAiUpstreamProtocol::Codex, "https://anyrouter.top/v1"),
+            (OpenAiUpstreamProtocol::ResponsesApi, "https://api.openai.com/v1"),
+            (OpenAiUpstreamProtocol::ResponsesApi, "https://anyrouter.top.example/v1"),
+        ] {
+            let mut body = original.as_object().unwrap().clone();
+            normalize_anyrouter_forced_tool_choice(&mut body, protocol, url);
+            assert_eq!(json!(body), original);
+        }
+    }
+
+    #[test]
+    fn anyrouter_forced_tool_leaves_other_choices_and_invalid_selections_unchanged() {
+        for choice in [json!("auto"), json!("none"), json!("required"),
+            json!({"type":"function","name":"missing"})] {
+            let original = json!({"tool_choice":choice,
+                "tools":[{"type":"function","name":"echo","parameters":{}}]});
+            let mut body = original.as_object().unwrap().clone();
+            normalize_anyrouter_forced_tool_choice(&mut body, OpenAiUpstreamProtocol::ResponsesApi,
+                "https://anyrouter.top/v1");
+            assert_eq!(json!(body), original);
+        }
     }
 }

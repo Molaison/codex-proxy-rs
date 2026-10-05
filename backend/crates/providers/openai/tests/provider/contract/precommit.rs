@@ -175,7 +175,13 @@ async fn later_structural_events_do_not_extend_grace_and_late_overload_is_not_re
         write_http_chunk(&mut socket, &sse(&overload())).await;
         socket.write_all(b"0\r\n\r\n").await.unwrap();
     });
-    store.seed_api_key("acct_provider_contract", base_url.clone(), ResponsesTransport::Http).await;
+    store
+        .seed_api_key(
+            "acct_provider_contract",
+            base_url.clone(),
+            ResponsesTransport::Http,
+        )
+        .await;
     let trace = TraceContext::new("req_precommit");
     let mut stream = provider_with_base_url(&store, base_url)
         .execute(
@@ -252,31 +258,56 @@ async fn immediate_release_preserves_wire_and_records_the_boundary_once() {
             )
             .await
             .unwrap();
-        let first = timeout(Duration::from_secs(1), next_client_event(&mut stream))
-            .await
-            .unwrap_or_else(|error| panic!("{reason} did not release immediately: {error}"));
+        // EOF 缺少真实终态后不再是成功边界：Provider 不得把缓存的结构帧当作
+        // 尾部释放；其余边界仍必须在上游结束前立即释放一次。
+        let first = if reason == "eof" {
+            None
+        } else {
+            Some(
+                timeout(Duration::from_secs(1), next_client_event(&mut stream))
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{reason} did not release immediately: {error}")
+                    }),
+            )
+        };
         if let Some(release) = release {
             release.send(()).unwrap();
         }
         let mut wire = Vec::new();
-        wire.extend_from_slice(first.wire_event().unwrap().raw_sse_frame().unwrap());
+        if let Some(first) = first {
+            wire.extend_from_slice(first.wire_event().unwrap().raw_sse_frame().unwrap());
+        }
+        let mut failure = None;
         while let Some(event) = stream.next().await {
-            if let Some(frame) = event
-                .unwrap()
-                .wire_event()
-                .and_then(|wire| wire.raw_sse_frame())
-            {
-                wire.extend_from_slice(frame);
+            match event {
+                Ok(event) => {
+                    if let Some(frame) = event.wire_event().and_then(|wire| wire.raw_sse_frame()) {
+                        wire.extend_from_slice(frame);
+                    }
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
             }
         }
-        assert_eq!(wire, body.as_bytes());
         let releases = releases(&trace);
-        assert_eq!(releases.len(), 1);
-        assert_eq!(releases[0]["data"]["reason"], reason);
-        if reason == "byte_limit" {
-            assert!(releases[0]["data"]["prefetchedBytes"].as_u64().unwrap() > 1024 * 1024);
+        if reason == "eof" {
+            let failure = failure.expect("EOF without a terminal event must fail");
+            assert_eq!(failure.kind(), ProviderErrorKind::Protocol);
+            assert!(wire.is_empty());
+            assert!(releases.is_empty());
         } else {
-            assert_eq!(releases[0]["data"]["prefetchedBytes"], body.len());
+            assert!(failure.is_none(), "{reason} must not truncate the stream");
+            assert_eq!(wire, body.as_bytes());
+            assert_eq!(releases.len(), 1);
+            assert_eq!(releases[0]["data"]["reason"], reason);
+            if reason == "byte_limit" {
+                assert!(releases[0]["data"]["prefetchedBytes"].as_u64().unwrap() > 1024 * 1024);
+            } else {
+                assert_eq!(releases[0]["data"]["prefetchedBytes"], body.len());
+            }
         }
         server.await.unwrap();
     }

@@ -1,3 +1,4 @@
+use gateway_core::error::ProviderErrorKind;
 use gateway_core::event::{ContentKind, FinishReason, GatewayEvent, ProviderEvent};
 
 use provider_openai::transport::canonical::{
@@ -1168,4 +1169,121 @@ fn billing_should_not_emit_partial_totals_for_unpriced_tool_outputs() {
             "{output}"
         );
     }
+}
+
+#[test]
+fn raw_sse_passthrough_should_fail_protocol_when_stream_ends_before_terminal() {
+    // 真实 forced 上游只发这几类 tool 事件，连 [DONE] 都没有；下游 DONE 由
+    // 代理生成，不能反过来证明上游成功结束。
+    let body = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_truncated\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_truncated\",\"call_id\":\"call_truncated\",\"name\":\"lookup\",\"arguments\":\"\"}}\n\n",
+        "event: response.function_call_arguments.delta\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_truncated\",\"call_id\":\"call_truncated\",\"delta\":\"{\\\"q\\\":1}\"}\n\n",
+        "event: response.function_call_arguments.done\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"item_id\":\"fc_truncated\",\"call_id\":\"call_truncated\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":1}\"}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_truncated\",\"call_id\":\"call_truncated\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":1}\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let mut decoder = CodexCanonicalDecoder::new("fallback").with_raw_sse_passthrough();
+    let streamed = decoder
+        .push(body.as_bytes())
+        .expect("wire frames stay transparent");
+    assert!(decoder.take_timing_signals().semantic_output);
+    assert_eq!(
+        streamed
+            .iter()
+            .filter_map(ProviderEvent::wire_event)
+            .filter_map(|wire| wire.event_type())
+            .collect::<Vec<_>>(),
+        vec![
+            "response.created",
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+        ]
+    );
+
+    let failure = decoder
+        .finish()
+        .expect_err("EOF without a terminal event must not be reported as success");
+    assert!(failure.semantic_output_seen());
+    let CodexCanonicalError::Protocol(error) = failure.error() else {
+        panic!("missing terminal event must be a protocol failure");
+    };
+    assert_eq!(error.kind(), ProviderErrorKind::Protocol);
+    assert_eq!(
+        error.diagnostic().and_then(|diagnostic| diagnostic.code()),
+        Some("ended_before_terminal")
+    );
+    assert_eq!(
+        error
+            .client_visible_upstream_error()
+            .and_then(|visible| visible.code()),
+        Some("upstream_stream_truncated")
+    );
+}
+
+#[test]
+fn decoder_should_fail_protocol_when_stream_ends_before_terminal() {
+    // 最后一帧故意不带空行，由 finish flush：缺终态时这段已产出的 canonical
+    // 事件必须随 typed failure 一起保留，而不是被当成成功尾部。
+    let body = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_truncated\",\"model\":\"gpt-test\",\"status\":\"in_progress\"}}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_truncated\",\"call_id\":\"call_truncated\",\"name\":\"lookup\",\"arguments\":\"\"}}\n\n",
+        "event: response.function_call_arguments.delta\n",
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_truncated\",\"call_id\":\"call_truncated\",\"delta\":\"{\\\"q\\\":1}\"}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_truncated\",\"call_id\":\"call_truncated\",\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":1}\"}}"
+    );
+    let mut decoder = CodexCanonicalDecoder::new("fallback");
+    let streamed = decoder
+        .push(body.as_bytes())
+        .expect("streamed frames stay canonical");
+    assert!(
+        canonical_facts(&streamed)
+            .iter()
+            .any(|event| matches!(event, GatewayEvent::ToolCallDelta(_)))
+    );
+    assert!(decoder.take_timing_signals().semantic_output);
+
+    let failure = decoder
+        .finish()
+        .expect_err("EOF without a terminal event must fail");
+    assert!(failure.semantic_output_seen());
+    assert!(matches!(failure.error(), CodexCanonicalError::Protocol(_)));
+    assert_eq!(
+        failure
+            .events()
+            .iter()
+            .filter_map(ProviderEvent::wire_event)
+            .filter_map(|wire| wire.event_type())
+            .collect::<Vec<_>>(),
+        vec!["response.output_item.done"]
+    );
+}
+
+#[test]
+fn raw_sse_passthrough_should_accept_terminal_frame_without_blank_line() {
+    let mut decoder = CodexCanonicalDecoder::new("fallback").with_raw_sse_passthrough();
+    decoder
+        .push(b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_terminal\",\"model\":\"gpt-test\"}}\n\n")
+        .expect("created frame");
+    decoder
+        .push(b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_terminal\",\"model\":\"gpt-test\",\"status\":\"completed\",\"output\":[]}}")
+        .expect("buffer partial terminal frame");
+
+    let events = decoder
+        .finish()
+        .expect("a real terminal frame must not be misjudged as truncated");
+    assert!(matches!(
+        canonical_facts(&events).last(),
+        Some(GatewayEvent::Completed(_))
+    ));
 }
