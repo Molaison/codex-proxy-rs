@@ -1154,6 +1154,28 @@ impl ExecutionStore for PgExecutionStore {
         rejection: gateway_core::engine::EntryRejection,
     ) -> Result<(), CoreStoreError> {
         let error = rejection.error;
+        let (routing_scope, routing_group_refs, routing_group_names) =
+            routing_snapshot_row(&rejection.routing);
+        let routing_error = rejection.routing_error.as_ref().map(|error| {
+            use gateway_core::error::RoutingError;
+            let code = match error {
+                RoutingError::EmptyAccountScope => "empty_account_scope",
+                RoutingError::ModelNotFound { .. } => "model_not_found",
+                RoutingError::NoCapableProvider { .. } => "no_capable_provider",
+                RoutingError::NoCapableProviderEndpoint { reason, .. } => reason,
+                RoutingError::UnsupportedProviderEndpoint { .. } => "unsupported_provider_endpoint",
+                _ => "invalid_routing_configuration",
+            };
+            let exclusions = match error {
+                RoutingError::NoCapableProvider { exclusions, .. } => serde_json::json!(exclusions),
+                _ => serde_json::json!({}),
+            };
+            serde_json::json!({
+                "code": code,
+                "message": error.to_string(),
+                "providerExclusions": exclusions,
+            })
+        });
         super::OpsEventRepository::append_ops_event(
             &super::PgOpsEventRepository::new(self.pool.clone()),
             super::OpsEvent {
@@ -1181,6 +1203,14 @@ impl ExecutionStore for PgExecutionStore {
                 message: serde_json::json!({
                     "requestId": rejection.request_id.as_str(),
                     "clientKeyId": rejection.client_key_id.as_str(),
+                    "configRevision": rejection.config_revision.get(),
+                    "requestedModel": rejection.requested_model.as_ref().map(|model| model.as_str()),
+                    "operation": rejection.operation.as_str(),
+                    "endpoint": rejection.endpoint,
+                    "routingScope": routing_scope,
+                    "routingGroupRefs": routing_group_refs,
+                    "routingGroupNames": routing_group_names,
+                    "routingError": routing_error,
                     "message": error.client_message(),
                 })
                 .to_string(),

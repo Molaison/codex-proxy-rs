@@ -3510,6 +3510,12 @@ fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
     let rejections = store.entry_rejections.lock().unwrap();
     assert_eq!(rejections.len(), 1);
     assert_eq!(rejections[0].error.kind(), GatewayErrorKind::ModelNotFound);
+    assert_eq!(rejections[0].requested_model.as_ref().unwrap().as_str(), model);
+    assert_eq!(rejections[0].endpoint, "/v1/responses");
+    assert!(matches!(
+        rejections[0].routing_error,
+        Some(gateway_core::error::RoutingError::ModelNotFound { .. })
+    ));
     assert!(store.requests.lock().unwrap().is_empty());
 }
 

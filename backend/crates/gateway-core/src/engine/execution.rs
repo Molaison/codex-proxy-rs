@@ -1110,6 +1110,12 @@ impl DefaultExecutionService {
             ))
         });
         let budget_key_id = request.client.policy.key_id().clone();
+        let config_revision = request.client.snapshot.revision();
+        let routing = authorization.account_scope.routing_snapshot();
+        let requested_model = request.target.public_model().cloned();
+        let operation = request.operation.kind();
+        let endpoint = request.metadata.endpoint.clone();
+        let mut routing_error = None;
         let mut entered_execution = false;
         let result = async {
             if request_policy.is_some() {
@@ -1199,7 +1205,10 @@ impl DefaultExecutionService {
                     )
                 }
             }
-            .map_err(map_routing_error)?;
+            .map_err(|error| {
+                routing_error = Some(error.clone());
+                map_routing_error(error)
+            })?;
             let continuation = match request.metadata.previous_response_id.as_ref() {
                 Some(previous) => {
                     let resolve = self
@@ -1303,6 +1312,12 @@ impl DefaultExecutionService {
             let rejection = super::EntryRejection {
                 request_id: request_id.clone(),
                 client_key_id: budget_key_id.clone(),
+                config_revision,
+                routing,
+                requested_model,
+                operation,
+                endpoint,
+                routing_error,
                 error: error.clone(),
                 latency: started_at.elapsed().unwrap_or_default(),
             };

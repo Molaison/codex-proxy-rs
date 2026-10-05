@@ -395,10 +395,11 @@ fn blocked_model_provider_should_not_be_misreported_as_model_not_found() {
         )
         .expect_err("OpenAI is blocked and xAI does not publish this model");
 
-    assert!(matches!(
-        error,
-        gateway_core::error::RoutingError::NoCapableProvider { .. }
-    ));
+    let gateway_core::error::RoutingError::NoCapableProvider { exclusions, .. } = error else {
+        panic!("expected provider exclusions");
+    };
+    assert_eq!(exclusions.get("openai"), Some(&"request_provider_restriction"));
+    assert_eq!(exclusions.get("xai"), Some(&"model_absent_from_catalog"));
 }
 
 #[test]

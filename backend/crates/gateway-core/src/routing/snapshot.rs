@@ -1046,6 +1046,7 @@ impl RuntimeSnapshot {
     ) -> Result<RoutingPlan, RoutingError> {
         let requirements = operation.capability_requirements();
         let mut candidates = Vec::new();
+        let mut exclusions = BTreeMap::new();
 
         if context.required_provider.is_none() && account_scope.provider_kinds().is_empty() {
             return Err(RoutingError::EmptyAccountScope);
@@ -1057,12 +1058,14 @@ impl RuntimeSnapshot {
         );
         for provider in &providers {
             if !self.providers.contains(provider) {
+                exclusions.insert(provider.as_str().to_owned(), "provider_not_registered");
                 continue;
             }
             if self
                 .model_alias(public_model.as_str())
                 .is_some_and(|alias| &alias.provider != provider)
             {
+                exclusions.insert(provider.as_str().to_owned(), "alias_provider_mismatch");
                 continue;
             }
             if context
@@ -1071,6 +1074,7 @@ impl RuntimeSnapshot {
                 .is_some_and(|expected| expected != provider)
                 || context.blocked_providers.contains(provider)
             {
+                exclusions.insert(provider.as_str().to_owned(), "request_provider_restriction");
                 continue;
             }
             let requested_model = public_model.as_str();
@@ -1091,6 +1095,7 @@ impl RuntimeSnapshot {
             if enforce_account_model_policy
                 && !account_scope.allows_provider_model(provider, upstream_model.as_str())
             {
+                exclusions.insert(provider.as_str().to_owned(), "account_model_policy");
                 continue;
             }
             let emulated_features = match self
@@ -1100,11 +1105,15 @@ impl RuntimeSnapshot {
             {
                 Some(capabilities) => {
                     let Some(emulated) = capabilities.match_requirements(&requirements) else {
+                        exclusions.insert(provider.as_str().to_owned(), "capability_mismatch");
                         continue;
                     };
                     emulated
                 }
-                None if self.exhaustive_provider_catalogs.contains(provider) => continue,
+                None if self.exhaustive_provider_catalogs.contains(provider) => {
+                    exclusions.insert(provider.as_str().to_owned(), "model_absent_from_catalog");
+                    continue;
+                }
                 None => BTreeSet::new(),
             };
             candidates.push(ProviderCandidate {
@@ -1131,6 +1140,7 @@ impl RuntimeSnapshot {
             }
             return Err(RoutingError::NoCapableProvider {
                 model: public_model.as_str().to_owned(),
+                exclusions,
             });
         }
 
@@ -1167,12 +1177,18 @@ impl RuntimeSnapshot {
                 .as_ref()
                 .is_none_or(|required| required == provider)
             && !context.blocked_providers.contains(provider);
-        if !available
-            || upstream_model
-                .is_some_and(|model| !account_scope.allows_provider_model(provider, model.as_str()))
+        if !available {
+            return Err(RoutingError::NoCapableProviderEndpoint {
+                provider: provider.as_str().to_owned(),
+                reason: "provider_outside_available_scope",
+            });
+        }
+        if upstream_model
+            .is_some_and(|model| !account_scope.allows_provider_model(provider, model.as_str()))
         {
             return Err(RoutingError::NoCapableProviderEndpoint {
                 provider: provider.as_str().to_owned(),
+                reason: "account_model_policy",
             });
         }
         let model_binding_valid =

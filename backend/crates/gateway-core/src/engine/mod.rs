@@ -874,6 +874,12 @@ pub struct IntermediateFailure {
 pub struct EntryRejection {
     pub request_id: ModelRequestId,
     pub client_key_id: ClientApiKeyId,
+    pub config_revision: ConfigRevision,
+    pub routing: crate::routing::AccountRoutingSnapshot,
+    pub requested_model: Option<PublicModelId>,
+    pub operation: OperationKind,
+    pub endpoint: String,
+    pub routing_error: Option<crate::validation::RoutingError>,
     pub error: GatewayError,
     pub latency: Duration,
 }

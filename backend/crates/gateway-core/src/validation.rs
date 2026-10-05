@@ -103,12 +103,16 @@ pub enum RoutingError {
     NoCapableProvider {
         /// 客户端提交的模型名称。
         model: String,
+        /// 路由当时逐个 Provider 的安全排除原因；不包含凭据或请求正文。
+        exclusions: std::collections::BTreeMap<String, &'static str>,
     },
     /// 固定 Provider 的原生端点当前不可执行。
     #[error("provider endpoint `{provider}` is unavailable")]
     NoCapableProviderEndpoint {
         /// adapter 已绑定的 Provider。
         provider: String,
+        /// 路由当时的安全拒绝原因。
+        reason: &'static str,
     },
     /// 固定 Provider 可用，但未声明该原生端点操作所需能力。
     #[error("provider endpoint `{provider}` does not support `{operation}`")]
