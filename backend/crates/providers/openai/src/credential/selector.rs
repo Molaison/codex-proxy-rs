@@ -102,6 +102,7 @@ pub(crate) struct SelectCodexProviderEndpointCredential<'a> {
 
 struct CredentialSelectionInput<'a> {
     requires_websocket: bool,
+    oauth_only: bool,
     request_url: &'a Url,
     attempt: &'a AttemptContext,
     session_affinity_key: Option<&'a ProviderSessionAffinityKey>,
@@ -296,6 +297,7 @@ impl CodexCredentialSelector {
         request: &SelectCodexCredential<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            oauth_only: false,
             requires_websocket: false,
             request_url: request.request_url,
             attempt: request.attempt,
@@ -316,6 +318,7 @@ impl CodexCredentialSelector {
         guardian: bool,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            oauth_only: false,
             requires_websocket,
             request_url: request.request_url,
             attempt: request.attempt,
@@ -376,7 +379,25 @@ impl CodexCredentialSelector {
         request: &SelectCodexProviderEndpointCredential<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
+            oauth_only: false,
             requires_websocket: false,
+            request_url: request.request_url,
+            attempt: request.attempt,
+            session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
+            session_affinity_observation: request.session_affinity,
+            guardian: false,
+        };
+        self.select_inner(&input, None, None).await
+    }
+
+    /// 实时语音只使用 ChatGPT OAuth，仍复用账号范围、队列和并发租约。
+    pub(crate) async fn select_for_realtime(
+        &self,
+        request: &SelectCodexProviderEndpointCredential<'_>,
+    ) -> Result<CodexCredentialLease, CredentialSelectionError> {
+        let input = CredentialSelectionInput {
+            requires_websocket: false,
+            oauth_only: true,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
@@ -456,6 +477,8 @@ impl CodexCredentialSelector {
                 .into_iter()
                 .filter(|account| {
                     account.provider() == &self.provider_kind
+                        && (!request.oauth_only
+                            || account.authentication_kind() == CODEX_AUTHENTICATION_KIND_OAUTH)
                         && (diagnostic
                             || request
                                 .attempt

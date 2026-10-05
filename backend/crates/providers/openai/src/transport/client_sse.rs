@@ -217,7 +217,12 @@ impl CodexBackendClient {
 
         let rate_limit_updates = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         Ok(CodexBackendStreamingResponse {
-            body: http_sse_stream(response, Arc::clone(&rate_limit_updates), trace),
+            body: http_sse_stream(
+                response,
+                Arc::clone(&rate_limit_updates),
+                trace,
+                self.protocol == OpenAiUpstreamProtocol::ResponsesApi,
+            ),
             transport: CodexBackendTransport::HttpSse,
             websocket_connection_id: None,
             turn_state,
@@ -690,6 +695,7 @@ fn http_sse_stream(
     response: ReqwestResponse,
     rate_limit_updates: CodexRateLimitUpdates,
     trace: TraceContext,
+    serialize_output_items: bool,
 ) -> CodexBackendSseStream {
     let stream: CodexBackendSseStream =
         Box::pin(response.bytes_stream().map_err(CodexClientError::Http));
@@ -721,7 +727,12 @@ fn http_sse_stream(
         }
         capture.finish();
     });
-    observe_http_sse_rate_limits(stream, rate_limit_updates)
+    let stream = observe_http_sse_rate_limits(stream, rate_limit_updates);
+    if serialize_output_items {
+        super::output_order::serialize_output_items(stream)
+    } else {
+        stream
+    }
 }
 
 fn observe_http_sse_rate_limits(

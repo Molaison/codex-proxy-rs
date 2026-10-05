@@ -24,6 +24,7 @@ use super::responses::{ContinuationIntent, DecodedResponsesRequest};
 #[derive(Clone)]
 pub(crate) struct OpenAiService {
     execution: Arc<dyn ExecutionService>,
+    pub(super) live: Arc<super::live::LiveSessions>,
     lifecycle: Arc<dyn ConnectionLifecycle>,
 }
 
@@ -33,11 +34,12 @@ impl OpenAiService {
     }
 
     #[must_use]
-    pub(crate) const fn new(
+    pub(crate) fn new(
         execution: Arc<dyn ExecutionService>,
         lifecycle: Arc<dyn ConnectionLifecycle>,
     ) -> Self {
         Self {
+            live: Arc::default(),
             execution,
             lifecycle,
         }
@@ -168,6 +170,39 @@ impl OpenAiService {
         request: StartProviderExecution,
     ) -> Result<StartedExecution, GatewayError> {
         self.execution.start_provider_endpoint(request).await
+    }
+
+    pub(crate) async fn start_live(
+        &self,
+        client: AuthenticatedClient,
+        operation: gateway_core::operation::Operation,
+        user_agent: Option<String>,
+        transport: gateway_core::operation::RealtimeTransport,
+    ) -> Result<StartedExecution, GatewayError> {
+        let provider = ProviderKind::new("openai").map_err(|_| {
+            GatewayError::new(GatewayErrorKind::Internal, "OpenAI provider identifier is invalid")
+        })?;
+        self.execution
+            .start_provider_endpoint(StartProviderExecution {
+                client,
+                provider,
+                upstream_model: None,
+                operation,
+                metadata: ExecutionRequestMetadata {
+                    protocol: "openai-live".to_owned(),
+                    endpoint: "/v1/live".to_owned(),
+                    transport: if transport == gateway_core::operation::RealtimeTransport::WebRtc {
+                        ClientTransport::HttpJson
+                    } else {
+                        ClientTransport::WebSocket
+                    },
+                    stream: true,
+                    client_ip: None,
+                    user_agent,
+                    previous_response_id: None,
+                },
+            })
+            .await
     }
 
     pub(crate) fn try_register_connection(

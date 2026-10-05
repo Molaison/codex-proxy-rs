@@ -4,6 +4,9 @@
 //! wire body 与连接级事实随 [`ProtocolPayload`] 或 [`RawJsonPayload`] 不透明传递，
 //! 由对应 Provider 自己解释。
 
+mod realtime;
+pub use realtime::{RealtimeInput, RealtimeRequest, RealtimeTransport};
+
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -24,6 +27,8 @@ pub enum OperationKind {
     GenerateImage,
     /// Provider 原生 standalone search。
     Search,
+    /// 长连接原生语音会话。
+    Realtime,
     /// 使用目标模型的真实 tokenizer 计数，不允许 Core 估算。
     CountTokens,
     /// Provider 声明并映射到固定上游目标的账号认证 HTTP 操作。
@@ -38,6 +43,7 @@ impl OperationKind {
             Self::Generate => "generate",
             Self::GenerateImage => "generate_image",
             Self::Search => "search",
+            Self::Realtime => "realtime",
             Self::CountTokens => "count_tokens",
             Self::ProviderHttp => "provider_http",
         }
@@ -866,6 +872,7 @@ pub enum Operation {
     GenerateImage(ImageRequest),
     /// Provider 原生 standalone search。
     Search(StandaloneSearchRequest),
+    Realtime(RealtimeRequest),
     /// 使用目标模型进行真实 Token 计数。
     CountTokens(TokenCountRequest),
     /// Provider 显式登记的账号认证 HTTP 操作。
@@ -900,6 +907,7 @@ impl Operation {
                 }),
             Self::GenerateImage(request) => Ok(request.payload().body().clone()),
             Self::Search(request) => Ok(request.payload().body().clone()),
+            Self::Realtime(request) => Ok(request.payload().body().clone()),
             Self::CountTokens(request) => Ok(request.payload().body().clone()),
             Self::ProviderHttp(request) => Ok(request.payload().body().clone()),
         }
@@ -926,6 +934,7 @@ impl Operation {
             Self::Generate(request) => request.protocol_payload().context().clone(),
             Self::GenerateImage(request) => request.payload().context().clone(),
             Self::Search(request) => request.payload().context().clone(),
+            Self::Realtime(request) => request.payload().context().clone(),
             Self::CountTokens(request) => request.payload().context().clone(),
             Self::ProviderHttp(request) => request.payload().context().clone(),
         };
@@ -1006,6 +1015,7 @@ impl Operation {
             Self::Generate(request) => request.protocol_payload().context().clone(),
             Self::GenerateImage(request) => request.payload().context().clone(),
             Self::Search(request) => request.payload().context().clone(),
+            Self::Realtime(request) => request.payload().context().clone(),
             Self::CountTokens(request) => request.payload().context().clone(),
             Self::ProviderHttp(request) => request.payload().context().clone(),
         };
@@ -1017,6 +1027,7 @@ impl Operation {
             Self::Generate(request) => request.payload.source_requirements.is_some(),
             Self::GenerateImage(request) => request.payload().translated,
             Self::Search(request) => request.payload().translated,
+            Self::Realtime(request) => request.payload().translated,
             Self::CountTokens(request) => request.payload().translated,
             Self::ProviderHttp(request) => request.payload().translated,
         }
@@ -1081,6 +1092,16 @@ impl Operation {
                     },
                 }))
             }
+            Self::Realtime(mut request) => {
+                let payload = request.payload;
+                request.payload = RawJsonPayload {
+                    protocol: target_protocol.unwrap_or(payload.protocol),
+                    body: body.unwrap_or(payload.body),
+                    context,
+                    translated: payload.translated || translating,
+                };
+                Ok(Self::Realtime(request))
+            }
             Self::CountTokens(request) => {
                 let payload = request.payload;
                 Ok(Self::CountTokens(TokenCountRequest {
@@ -1117,6 +1138,7 @@ impl Operation {
             Self::Generate(request) => request.protocol_payload().protocol(),
             Self::GenerateImage(request) => request.payload().protocol(),
             Self::Search(request) => request.payload().protocol(),
+            Self::Realtime(request) => request.payload().protocol(),
             Self::CountTokens(request) => request.payload().protocol(),
             Self::ProviderHttp(request) => request.payload().protocol(),
         }
@@ -1145,6 +1167,7 @@ impl Operation {
             Self::Generate(_) => OperationKind::Generate,
             Self::GenerateImage(_) => OperationKind::GenerateImage,
             Self::Search(_) => OperationKind::Search,
+            Self::Realtime(_) => OperationKind::Realtime,
             Self::CountTokens(_) => OperationKind::CountTokens,
             Self::ProviderHttp(_) => OperationKind::ProviderHttp,
         }
@@ -1157,6 +1180,7 @@ impl Operation {
             Self::Generate(request) => request.requirements(),
             Self::GenerateImage(_) => CapabilityRequirements::new(OperationKind::GenerateImage),
             Self::Search(_) => CapabilityRequirements::new(OperationKind::Search),
+            Self::Realtime(_) => CapabilityRequirements::new(OperationKind::Realtime),
             Self::CountTokens(_) => CapabilityRequirements::new(OperationKind::CountTokens),
             Self::ProviderHttp(_) => CapabilityRequirements::new(OperationKind::ProviderHttp),
         }
@@ -1168,7 +1192,7 @@ impl Operation {
         match self {
             Self::Generate(request) => request.image_generation_requested(),
             Self::GenerateImage(_) => true,
-            Self::Search(_) | Self::CountTokens(_) | Self::ProviderHttp(_) => false,
+            Self::Search(_) | Self::Realtime(_) | Self::CountTokens(_) | Self::ProviderHttp(_) => false,
         }
     }
 
@@ -1179,6 +1203,7 @@ impl Operation {
             Self::Generate(request) => request.provider_session_state(provider),
             Self::GenerateImage(_)
             | Self::Search(_)
+            | Self::Realtime(_)
             | Self::CountTokens(_)
             | Self::ProviderHttp(_) => None,
         }

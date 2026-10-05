@@ -104,6 +104,7 @@ use crate::transport::{
 mod execution;
 mod failure;
 mod observation;
+mod realtime;
 mod upstream_adapter;
 mod workers;
 pub(crate) use workers::ClientReleaseServices;
@@ -460,6 +461,9 @@ impl Provider for CodexProvider {
                 ProviderErrorKind::Timeout,
                 UpstreamSendState::NotSent,
             ));
+        }
+        if let Operation::Realtime(live) = request.operation() {
+            return self.execute_realtime(live, context).await;
         }
         if let Operation::GenerateImage(image) = request.operation() {
             return self.execute_image(image, candidate, context).await;

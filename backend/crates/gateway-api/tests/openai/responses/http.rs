@@ -102,6 +102,7 @@ enum NextStep {
     Event(CoordinatedEvent),
     DelayedEvent(Duration, CoordinatedEvent),
     Error(EngineError),
+    DelayedError(Duration, EngineError),
     FinalizeCancelled,
     FinalizeSuccess,
     End,
@@ -307,6 +308,13 @@ impl ExecutionSession for FakeSession {
                     tokio::time::sleep(delay).await;
                     self.trace.push("next_event");
                     Ok(Some(event))
+                }
+                NextStep::DelayedError(delay, error) => {
+                    self.trace.push("wait_error");
+                    tokio::time::sleep(delay).await;
+                    self.trace.push("next_error");
+                    self.finalized = true;
+                    Err(error)
                 }
                 NextStep::Error(error) => {
                     self.trace.push("next_error");
@@ -3017,4 +3025,145 @@ async fn compressed_http_request_above_default_limit_should_reach_execution_afte
             );
         }
     }
+}
+
+async fn short_queue_response(session: FakeSession) -> axum::response::Response {
+    use crate::openai::{
+        DefaultExecutionService, IgnoredClientApiKeyUsage, ProviderRegistry,
+        RuntimeSnapshotHandle, UnusedAdmissions, UnusedContinuation, UnusedExecutionStore,
+    };
+
+    let snapshot = crate::openai::snapshot("sk_queue_test", "openai");
+    let settings = snapshot.settings().clone().with_concurrency_queues(64, 0, 30);
+    let snapshot = snapshot.with_settings(&settings).unwrap();
+    let source = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(snapshot),
+        Arc::new(UnusedExecutionStore),
+        ProviderRegistry::default(),
+        Arc::new(UnusedAdmissions),
+        Arc::new(UnusedContinuation),
+        Arc::new(IgnoredClientApiKeyUsage),
+    );
+    let execution = Arc::new(SessionExecution {
+        client: source
+            .authenticate("sk_queue_test")
+            .expect("authenticated client"),
+        session: Mutex::new(Some(Box::new(session))),
+        middleware: None,
+    });
+    api_router(execution)
+        .await
+        .oneshot(
+            Request::post("/v1/responses")
+                .header(AUTHORIZATION, "Bearer sk_queue_test")
+                .body(Body::from(
+                    json!({"model":"model-a","input":"synthetic","stream":true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn short_queue_keepalive_survives_two_minutes_and_delivers_the_original_execution() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::DelayedEvent(
+                Duration::from_secs(180),
+                delivery(started(), CommitRequirement::CommitBeforeDelivery),
+            ),
+            NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
+            NextStep::FinalizeSuccess,
+        ],
+    );
+    let response = short_queue_response(session).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    assert_eq!(response.headers()["x-accel-buffering"], "no");
+    assert!(trace.client_statuses().is_empty());
+    let mut body = response.into_body().into_data_stream();
+    for _ in 0..11 {
+        let chunk = tokio::time::timeout(Duration::from_secs(16), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(chunk, Bytes::from_static(b": keep-alive\n\n"));
+        assert!(!trace.snapshot().contains(&"commit"));
+    }
+    let mut result = Vec::new();
+    while let Some(chunk) = body.next().await {
+        result.extend_from_slice(&chunk.unwrap());
+    }
+    let result = String::from_utf8(result).unwrap();
+    assert_eq!(result.matches("event: response.created").count(), 1);
+    assert_eq!(result.matches("event: response.completed").count(), 1);
+    assert_eq!(
+        trace
+            .snapshot()
+            .iter()
+            .filter(|event| **event == "wait_event")
+            .count(),
+        1
+    );
+    assert_eq!(
+        trace
+            .snapshot()
+            .iter()
+            .filter(|event| **event == "commit")
+            .count(),
+        1
+    );
+    assert!(!trace.is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn short_queue_keepalive_disconnect_cancels_the_pending_execution() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::DelayedEvent(
+                Duration::from_secs(180),
+                delivery(started(), CommitRequirement::CommitBeforeDelivery),
+            ),
+            NextStep::FinalizeCancelled,
+        ],
+    );
+    let response = short_queue_response(session).await;
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(
+        body.next().await.unwrap().unwrap(),
+        Bytes::from_static(b": keep-alive\n\n")
+    );
+    drop(body);
+    tokio::task::yield_now().await;
+    assert!(trace.is_cancelled());
+    assert_eq!(trace.detached_finalizations(), 1);
+    assert!(!trace.snapshot().contains(&"commit"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn short_queue_keepalive_reports_delayed_failure_as_failed_sse() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![NextStep::DelayedError(
+            Duration::from_secs(45),
+            EngineError::Provider(ProviderError::new(
+                ProviderErrorKind::ConcurrencyQueueTimeout,
+                UpstreamSendState::NotSent,
+            )),
+        )],
+    );
+    let response = short_queue_response(session).await;
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("response.failed"));
+    assert!(body.contains("concurrency_queue_timeout"));
+    assert!(!body.contains("response.completed"));
+    assert!(body.ends_with("data: [DONE]\n\n"));
 }

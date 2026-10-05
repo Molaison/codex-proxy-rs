@@ -447,3 +447,25 @@ fn image_request_should_preserve_generation_and_edit_payloads_opaque() {
     );
     assert!(!format!("{edit:?}").contains("data:image/png"));
 }
+
+#[test]
+fn realtime_wire_replacement_keeps_the_same_input_channel() {
+    use std::sync::Arc;
+    use gateway_core::operation::{RealtimeRequest, RealtimeTransport};
+
+    let (_, receiver) = futures::channel::mpsc::channel(1);
+    let payload = RawJsonPayload::new("openai", Bytes::from_static(br#"{"sdp":"offer"}"#))
+        .expect("live payload");
+    let request = RealtimeRequest::new(payload, RealtimeTransport::WebRtc, receiver);
+    let input = request.input();
+    let body = Bytes::from_static(br#"{"sdp":"updated"}"#);
+    let operation = Operation::Realtime(request)
+        .replace_middleware_wire("openai", body.clone())
+        .expect("replace live payload");
+    assert_eq!(operation.kind(), OperationKind::Realtime);
+    assert_eq!(operation.capability_requirements().operation(), OperationKind::Realtime);
+    assert_eq!(operation.middleware_body().unwrap(), body);
+    let Operation::Realtime(request) = operation else { panic!("realtime operation") };
+    assert_eq!(request.transport(), RealtimeTransport::WebRtc);
+    assert!(Arc::ptr_eq(&input, &request.input()));
+}

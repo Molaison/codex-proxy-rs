@@ -68,6 +68,7 @@ use crate::routing::{
 use crate::runtime::{RuntimeSnapshotHandle, RuntimeSnapshotPublisher};
 use crate::settings::RequestSettings;
 
+const MODEL_REQUEST_DEADLINE: Duration = Duration::from_secs(10 * 60);
 const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const COORDINATION_TIMEOUT: Duration = Duration::from_millis(100);
 const MAX_NESTED_EXECUTIONS: usize = 16;
@@ -117,9 +118,15 @@ pub struct AuthenticatedClient {
 
 impl AuthenticatedClient {
     fn execution_timeout(&self) -> Option<Duration> {
-        self.settings
-            .as_ref()
-            .and_then(|settings| settings.execution_timeout(self.policy.key_id()))
+        let default = MODEL_REQUEST_DEADLINE + self.snapshot.client_queue_policy().timeout;
+        self.settings.as_ref().map_or(Some(default), |settings| {
+            // 由既有 Key 作用域解析默认值；显式 null 仍表示无限，不能按缺省值处理。
+            settings
+                .clone()
+                .with_execution(&self.policy, Some(duration_ms(default)))
+                .execution_values()
+                .and_then(|values| values.timeout_ms.map(Duration::from_millis))
+        })
     }
 
     #[must_use]
@@ -1881,7 +1888,8 @@ impl DefaultExecutionService {
                     model_request_id: request_id.clone(),
                     client_api_key_id: key.clone(),
                     lease_ttl: remaining,
-                    allow_concurrency_acquire: limits.max_concurrency == 0 || waiting.can_try(key),
+                    // 无并发上限时仍可能因 RPM 排队，不能绕过队首资格。
+                    allow_concurrency_acquire: waiting.can_try(key),
                     limits,
                 })
                 .fuse();
@@ -1913,10 +1921,19 @@ impl DefaultExecutionService {
                 }
                 ClientAdmissionDecision::Rejected(reason) => {
                     admission.armed = false;
-                    if reason == ClientAdmissionRejection::RateLimited || policy.max_waiting == 0 {
+                    // RPM 与并发饱和共用 FIFO；只有显式关闭队列才立即拒绝。
+                    if policy.max_waiting == 0 {
                         return Err(GatewayError::new(
-                            GatewayErrorKind::RateLimited,
-                            "request exceeds client API key limits",
+                            if reason == ClientAdmissionRejection::RateLimited {
+                                GatewayErrorKind::RateLimited
+                            } else {
+                                GatewayErrorKind::ConcurrencyQueueFull
+                            },
+                            if reason == ClientAdmissionRejection::RateLimited {
+                                "request exceeds client API key limits"
+                            } else {
+                                "concurrency wait queue is disabled"
+                            },
                         ));
                     }
                     if waiting.elapsed().is_zero()

@@ -225,3 +225,16 @@ async fn configured_cors_origin_assembles_router_and_answers_preflight() {
     assert!(allow_headers.contains("x-api-key"));
     assert!(allow_headers.contains("x-request-id"));
 }
+
+#[tokio::test]
+async fn live_create_requires_authentication_and_valid_signalling() {
+    let app = api_router_with_origins(ModelsExecution::new(), Vec::new()).await;
+    for (key, expected) in [(None, StatusCode::UNAUTHORIZED),
+        (Some("Bearer sk_models_test"), StatusCode::BAD_REQUEST)] {
+        let mut request = Request::post("/v1/live").header("content-type", "application/json");
+        if let Some(key) = key { request = request.header(AUTHORIZATION, key); }
+        let response = app.clone().oneshot(request.body(Body::from("{}")).unwrap())
+            .await.unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}

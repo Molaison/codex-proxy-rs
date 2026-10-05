@@ -119,6 +119,31 @@ pub(crate) async fn execute_prepared_responses(
     request: ResponsesHttpRequest,
     authorization: Option<Arc<dyn ResponseAuthorization>>,
 ) -> Response {
+    // 首个实际输出前的重试也可能超过 15 秒；注释保活不提交执行会话。
+    if !request.decoded.metadata().stream() {
+        return execute_prepared_responses_inner(service, prepared, request, authorization).await;
+    }
+    let request_id = prepared.request_id().clone();
+    let cancellation = prepared.cancellation();
+    let response = super::waiting::with_queue_keepalive(
+        Box::pin(execute_prepared_responses_inner(
+            service,
+            prepared,
+            request,
+            authorization,
+        )),
+        cancellation,
+    )
+    .await;
+    super::super::with_model_request_id(response, &request_id)
+}
+
+async fn execute_prepared_responses_inner(
+    service: OpenAiService,
+    prepared: PreparedRootExecution,
+    request: ResponsesHttpRequest,
+    authorization: Option<Arc<dyn ResponseAuthorization>>,
+) -> Response {
     let ResponsesHttpRequest {
         peer_address,
         ingress_id,

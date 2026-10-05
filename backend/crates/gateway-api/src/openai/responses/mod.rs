@@ -5,6 +5,7 @@ mod http;
 mod request;
 mod response;
 mod validation;
+mod waiting;
 pub mod websocket;
 
 pub use error::{ProtocolError, ProtocolErrorBody, RequestDecodeError, ResponseEncodeError};

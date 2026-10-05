@@ -135,15 +135,17 @@ fn request(service: &DefaultExecutionService, transport: ClientTransport) -> Sta
 }
 
 #[test]
-fn default_request_has_no_total_deadline_and_explicit_timeout_can_be_cleared() {
+fn default_request_keeps_queue_budget_and_explicit_timeout_can_be_cleared() {
     block_on(async {
         let service = service(Arc::default(), Arc::default());
         let client = request(&service, ClientTransport::HttpSse).client;
         let mut prepared = service.prepare_execution(client).await.unwrap();
-        assert_eq!(prepared.deadline_at().at(), None);
+        let default = Duration::from_secs(600)
+            + prepared.client().snapshot().client_queue_policy().timeout;
+        assert_eq!(prepared.deadline_at().at(), Some(prepared.started_at() + default));
         let baseline = prepared.request_settings();
         let mut values = baseline.execution_values().unwrap();
-        assert_eq!(values.timeout_ms, None);
+        assert_eq!(values.timeout_ms, Some(default.as_millis() as u64));
         values.timeout_ms = Some(1_800_000);
         let limited = baseline
             .replace_execution(&values, "timeout-plugin")
@@ -162,6 +164,11 @@ fn default_request_has_no_total_deadline_and_explicit_timeout_can_be_cleared() {
             )
             .unwrap();
         assert_eq!(prepared.deadline_at().at(), None);
+        let cleared = service
+            .prepare_execution(prepared.client().clone())
+            .await
+            .unwrap();
+        assert_eq!(cleared.deadline_at().at(), None);
         values.timeout_ms = Some(0);
         prepared
             .apply_settings(
@@ -4201,6 +4208,66 @@ fn cancelled_waiter_releases_its_place_and_new_requests_do_not_overtake_fifo() {
 }
 
 #[test]
+fn rpm_rejection_waits_for_a_slot_when_the_client_queue_is_enabled() {
+    use futures::FutureExt;
+    block_on(async {
+        for max_concurrency in [0, 1] {
+            let (service, admissions) =
+                queue_service(max_concurrency, 3, Duration::from_secs(2));
+            admissions.rpm_exhausted.store(true, Ordering::SeqCst);
+            let mut first = service.start(request(&service, ClientTransport::HttpJson));
+            let mut second = service.start(request(&service, ClientTransport::HttpJson));
+            assert!(first.as_mut().now_or_never().is_none());
+            assert!(second.as_mut().now_or_never().is_none());
+            assert_eq!(admissions.granted.load(Ordering::SeqCst), 0);
+            admissions.rpm_exhausted.store(false, Ordering::SeqCst);
+            let mut later = service.start(request(&service, ClientTransport::HttpJson));
+            assert!(
+                later.as_mut().now_or_never().is_none(),
+                "RPM recovery must preserve FIFO"
+            );
+            let first = first.await.expect("first RPM waiter should be admitted");
+            assert_eq!(admissions.granted.load(Ordering::SeqCst), 1);
+            drop(first);
+            let second = second.await.expect("second RPM waiter should be admitted");
+            assert_eq!(admissions.granted.load(Ordering::SeqCst), 2);
+            drop(second);
+            let later = later.await.expect("new request follows existing RPM waiters");
+            assert_eq!(admissions.granted.load(Ordering::SeqCst), 3);
+            drop(later);
+            assert!(admissions.active.lock().unwrap().is_empty());
+        }
+    });
+}
+
+#[test]
+fn disabled_client_queue_preserves_rpm_and_concurrency_rejections() {
+    block_on(async {
+        let (service, admissions) = queue_service(1, 0, Duration::from_secs(1));
+        let running = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        let concurrency = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(concurrency.kind(), GatewayErrorKind::ConcurrencyQueueFull);
+        admissions.rpm_exhausted.store(true, Ordering::SeqCst);
+        let rpm = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(rpm.kind(), GatewayErrorKind::RateLimited);
+        assert_eq!(admissions.granted.load(Ordering::SeqCst), 1);
+        drop(running);
+        assert!(admissions.active.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
 fn queue_timeout_and_rpm_rejection_leave_no_new_admission() {
     block_on(async {
         let (service, admissions) = queue_service(1, 1, Duration::from_secs(1));
@@ -4220,7 +4287,7 @@ fn queue_timeout_and_rpm_rejection_leave_no_new_admission() {
             .await
             .err()
             .unwrap();
-        assert_eq!(limited.kind(), GatewayErrorKind::RateLimited);
+        assert_eq!(limited.kind(), GatewayErrorKind::ConcurrencyQueueTimeout);
         assert_eq!(admissions.granted.load(Ordering::SeqCst), 1);
         drop(running);
     });
@@ -4769,7 +4836,13 @@ fn child_settings_recompute_key_scope_without_inheriting_parent_defaults() {
             .unwrap();
         for (token, expected_limit, expected_fast, expected_timeout, profile) in [
             ("sk_parent", 0, false, Some(90_000), "parent-default"),
-            ("sk_child", 9, true, None, "child-default"),
+            (
+                "sk_child",
+                9,
+                true,
+                Some((600 + original.client_queue_policy().timeout.as_secs()) * 1_000),
+                "child-default",
+            ),
         ] {
             let request = ClientAuthenticationRequest::bearer(token)
                 .unwrap()

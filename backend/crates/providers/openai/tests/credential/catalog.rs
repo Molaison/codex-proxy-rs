@@ -1195,6 +1195,195 @@ async fn api_key_catalog_accepts_namespaced_model_ids_without_inventing_capabili
 }
 
 #[tokio::test]
+async fn api_key_catalog_preserves_declared_context_and_filters_non_responses_models() {
+    use gateway_core::routing::ProviderModelContent;
+    use provider_openai::credential::ResponsesTransport;
+    use provider_openai::transport::CodexCatalogCapabilityEvidence;
+    use serde_json::json;
+
+    let upstream = MockServer::start().await;
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_api_key("acct_api", upstream.uri(), ResponsesTransport::Http)
+        .await;
+    // 前三项取自 Command Code 公开目录；不从名称推断 reasoning 或图片能力。
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"object":"list","data":[
+                    {"id":"deepseek/deepseek-v4.1-flash-fast",
+                     "name":"DeepSeek V4.1 Flash Fast","context_length":1_000_000,
+                     "supported_endpoints":["/chat/completions","/responses"]},
+                    {"id":"deepseek/deepseek-v4-flash-fast",
+                     "name":"DeepSeek V4 Flash Fast","context_length":1_000_000,
+                     "supported_endpoints":["/chat/completions"]},
+                    {"id":"deepseek/deepseek-v4-flash-vision-exp",
+                     "name":"DeepSeek V4 Flash Vision (exp)","context_length":1_000_000,
+                     "supported_endpoints":["/chat/completions","/responses"]},
+                    {"id":"legacy","display_name":"Legacy display","name":"Fallback name",
+                     "context_length":null,"supported_endpoints":null}
+                ]}))
+                .set_delay(std::time::Duration::from_millis(20)),
+        )
+        .expect(2)
+        .mount(&upstream)
+        .await;
+    let service = service_with_catalog_cache(&store, upstream.uri(), catalog_cache());
+    let snapshot = service.synchronize().await.expect("standard API directory");
+    assert_eq!(snapshot.models().len(), 4);
+    for (index, model) in snapshot.models().iter().enumerate() {
+        assert_eq!(
+            model
+                .limits()
+                .context_window_tokens()
+                .map(std::num::NonZeroU64::get),
+            (index < 3).then_some(1_000_000)
+        );
+        assert_eq!(model.limits().max_context_window_tokens(), None);
+        assert_eq!(
+            model.capabilities().reasoning(),
+            CodexCatalogCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            model.capabilities().image_input(),
+            CodexCatalogCapabilityEvidence::Unknown
+        );
+        assert_eq!(
+            model.capabilities().responses_api(),
+            match index {
+                1 => CodexCatalogCapabilityEvidence::DeclaredUnsupported,
+                3 => CodexCatalogCapabilityEvidence::Unknown,
+                _ => CodexCatalogCapabilityEvidence::DeclaredNative,
+            }
+        );
+    }
+    let account = store.account("acct_api").expect("API account");
+    let scope = client_scope(&[account]);
+    let (first, concurrent) = tokio::join!(
+        service.client_model_catalog(&scope, "0.154.0"),
+        service.client_model_catalog(&scope, "0.154.0")
+    );
+    let cached = service.client_model_catalog(&scope, "0.154.0").await;
+    for result in [first, concurrent, cached] {
+        let models = result.expect("adapted client catalog");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.model.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "deepseek/deepseek-v4.1-flash-fast",
+                "deepseek/deepseek-v4-flash-vision-exp",
+                "legacy"
+            ]
+        );
+        for (index, model) in models.iter().enumerate() {
+            let ProviderModelContent::Adapted(presentation) = &model.content else {
+                panic!("standard API metadata must remain adapted")
+            };
+            assert_eq!(
+                presentation.display_name(),
+                Some(
+                    [
+                        "DeepSeek V4.1 Flash Fast",
+                        "DeepSeek V4 Flash Vision (exp)",
+                        "Legacy display"
+                    ][index]
+                )
+            );
+            assert_eq!(
+                presentation.context_window_tokens(),
+                (index < 2).then_some(1_000_000)
+            );
+            assert_eq!(presentation.max_context_window_tokens(), None);
+            assert!(presentation.supported_reasoning_efforts().is_empty());
+            assert_eq!(presentation.default_reasoning_effort(), None);
+            assert!(!presentation.image_input());
+            assert!(!presentation.parallel_tool_calls());
+            assert!(!presentation.hidden());
+        }
+    }
+}
+
+#[tokio::test]
+async fn api_key_catalog_with_only_non_responses_models_is_known_empty() {
+    use provider_openai::credential::ResponsesTransport;
+    use serde_json::json;
+
+    let upstream = MockServer::start().await;
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_api_key("acct_api", upstream.uri(), ResponsesTransport::Http)
+        .await;
+    let service = service_with_catalog_cache(&store, upstream.uri(), catalog_cache());
+    let account = store.account("acct_api").expect("API account");
+    let scope = client_scope(&[account]);
+    for endpoints in [
+        json!(["/chat/completions"]),
+        json!(["/messages"]),
+        json!([]),
+    ] {
+        service
+            .invalidate()
+            .expect("invalidate old client metadata");
+        upstream.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data":[{"id":"other-api","supported_endpoints":endpoints}]
+            })))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        for _ in 0..2 {
+            assert!(
+                service
+                    .client_model_catalog(&scope, "0.154.0")
+                    .await
+                    .expect("explicitly empty Responses catalog is not an upstream failure")
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn api_key_catalog_rejects_malformed_declared_metadata() {
+    use provider_openai::credential::ResponsesTransport;
+    use serde_json::json;
+
+    let upstream = MockServer::start().await;
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_api_key("acct_api", upstream.uri(), ResponsesTransport::Http)
+        .await;
+    let service = service_with_catalog_cache(&store, upstream.uri(), catalog_cache());
+    for mut model in [
+        json!({"context_length":0}),
+        json!({"context_length":-1}),
+        json!({"context_length":"1000000"}),
+        json!({"supported_endpoints":"/responses"}),
+        json!({"supported_endpoints":[null]}),
+        json!({"supported_endpoints":["/responses\n"]}),
+        json!({"name":"bad\nname"}),
+    ] {
+        model["id"] = json!("vendor/model");
+        upstream.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[model]})))
+            .mount(&upstream)
+            .await;
+        assert!(
+            service.synchronize().await.is_err(),
+            "invalid metadata accepted: {model}"
+        );
+        assert!(service.cached().expect("cache").is_none());
+    }
+}
+
+#[tokio::test]
 async fn api_key_catalog_rejects_invalid_ids_and_duplicates() {
     use provider_openai::credential::ResponsesTransport;
 
