@@ -12458,11 +12458,7 @@ async fn request_local_retry_holds_delayed_overload_before_semantic_output() {
     use gateway_core::error::PreDeliveryRetry;
     use provider_openai::credential::ResponsesTransport;
 
-    for (oauth, code) in [
-        (true, "server_is_overloaded"),
-        (true, "server_error"),
-        (false, "server_is_overloaded"),
-    ] {
+    for (oauth, code) in [(true, "server_is_overloaded"), (true, "server_error"), (false, "server_is_overloaded")] {
         let store = Arc::new(MemoryAccountStore::default());
         let account_id = "acct_request_local_retry_on";
         let (base_url, release, first_chunk_sent, server) = paused_chunked_sse_server(
@@ -12472,18 +12468,14 @@ async fn request_local_retry_holds_delayed_overload_before_semantic_output() {
         if oauth {
             create_account(&store, account_id).await;
         } else {
-            store
-                .seed_api_key(account_id, base_url.clone(), ResponsesTransport::Http)
-                .await;
+            store.seed_api_key(account_id, base_url.clone(), ResponsesTransport::Http).await;
             store.set_api_key_request_local_retry(account_id, true);
         }
         let mut stream = provider_with_base_url(&store, base_url)
             .execute(
                 planned_request("openai", http_generate_operation()),
                 context("req_delayed_overload", CancellationToken::new()),
-            )
-            .await
-            .expect("prepare provider stream");
+            ).await.expect("prepare provider stream");
         let mut sent = Box::pin(first_chunk_sent);
         loop {
             tokio::select! {
@@ -12496,16 +12488,10 @@ async fn request_local_retry_holds_delayed_overload_before_semantic_output() {
         let exposed = timeout(Duration::from_millis(2800), async {
             loop {
                 let event = stream.next().await.expect("stream open").expect("event");
-                if event.has_client_event() {
-                    return;
-                }
+                if event.has_client_event() { return; }
             }
-        })
-        .await;
-        assert!(
-            exposed.is_err(),
-            "prefix must remain replayable beyond upstream 2.5s grace"
-        );
+        }).await;
+        assert!(exposed.is_err(), "prefix must remain replayable beyond upstream 2.5s grace");
         release.send(()).expect("release overload");
         let failure = loop {
             match stream.next().await.expect("overload event") {
@@ -12514,10 +12500,7 @@ async fn request_local_retry_holds_delayed_overload_before_semantic_output() {
             }
         };
         assert!(failure.replay_is_safe());
-        assert!(matches!(
-            failure.pre_delivery_retry(),
-            Some(PreDeliveryRetry::SameAccountTransientRetry { .. })
-        ));
+        assert!(matches!(failure.pre_delivery_retry(), Some(PreDeliveryRetry::SameAccountTransientRetry { .. })));
         server.await.expect("upstream server");
     }
 }

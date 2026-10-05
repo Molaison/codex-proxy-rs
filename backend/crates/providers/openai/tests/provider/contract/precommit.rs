@@ -175,13 +175,7 @@ async fn later_structural_events_do_not_extend_grace_and_late_overload_is_not_re
         write_http_chunk(&mut socket, &sse(&overload())).await;
         socket.write_all(b"0\r\n\r\n").await.unwrap();
     });
-    store
-        .seed_api_key(
-            "acct_provider_contract",
-            base_url.clone(),
-            ResponsesTransport::Http,
-        )
-        .await;
+    store.seed_api_key("acct_provider_contract", base_url.clone(), ResponsesTransport::Http).await;
     let trace = TraceContext::new("req_precommit");
     let mut stream = provider_with_base_url(&store, base_url)
         .execute(
@@ -299,7 +293,12 @@ async fn immediate_release_preserves_wire_and_records_the_boundary_once() {
             assert!(wire.is_empty());
             assert!(releases.is_empty());
         } else {
-            assert!(failure.is_none(), "{reason} must not truncate the stream");
+            if reason == "terminal" {
+                assert!(failure.is_none(), "a real terminal must finish normally");
+            } else {
+                let failure = failure.expect("released output without a terminal must fail");
+                assert_eq!(failure.kind(), ProviderErrorKind::Protocol);
+            }
             assert_eq!(wire, body.as_bytes());
             assert_eq!(releases.len(), 1);
             assert_eq!(releases[0]["data"]["reason"], reason);
