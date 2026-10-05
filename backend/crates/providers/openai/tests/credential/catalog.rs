@@ -487,11 +487,13 @@ async fn plan_catalog_cache_is_shared_and_manual_refresh_replaces_it() {
         .respond_with(ReplacingCatalogResponder {
             calls: Arc::clone(&calls),
         })
-        .expect(2)
+        .expect(3)
         .mount(&server)
         .await;
     let service = service_with_catalog_cache(&store, server.uri(), catalog_cache());
 
+    service.synchronize().await.expect("initial aggregate");
+    let generation = service.catalog_generation();
     let initial = service
         .cached_or_refresh_account_catalog(&first)
         .await
@@ -504,6 +506,8 @@ async fn plan_catalog_cache_is_shared_and_manual_refresh_replaces_it() {
         .refresh_account_catalog(second.id())
         .await
         .expect("manual refresh");
+    assert!(service.cached().expect("aggregate cache").is_none());
+    assert!(service.catalog_generation() > generation);
     let replaced = service
         .cached_or_refresh_account_catalog(&first)
         .await
@@ -513,7 +517,9 @@ async fn plan_catalog_cache_is_shared_and_manual_refresh_replaces_it() {
     assert_eq!(cached.models(), ["gpt-5.4"]);
     assert_eq!(refreshed.models(), ["gpt-5.5"]);
     assert_eq!(replaced.models(), ["gpt-5.5"]);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let rebuilt = service.synchronize().await.expect("refreshed aggregate");
+    assert_eq!(rebuilt.models()[0].request_model().as_str(), "gpt-5.5");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     server.verify().await;
 }
 

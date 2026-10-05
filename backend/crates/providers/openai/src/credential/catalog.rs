@@ -571,6 +571,7 @@ impl CodexCredentialCatalogService {
         let fetched = self.fetch_scope_models(&client, candidates).await?;
         let catalog = CodexPlanCatalog::new(scope, Utc::now(), model_ids(&fetched.models));
         self.replace_plan_catalog(&catalog).await?;
+        self.invalidate()?;
         Ok(catalog)
     }
 
