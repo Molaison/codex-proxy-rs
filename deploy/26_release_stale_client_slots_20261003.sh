@@ -12,7 +12,8 @@
 #   1) 只在网关容器自上次检查以来被重建过（StartedAt 变化）时才动作。没重建就直接退出，
 #      避免清掉仍在途请求的槽位（否则会短暂超过该 Key 的 max_concurrency）。
 #   2) 等网关 healthz 就绪（此时应用启动期的准入恢复已经跑完）再清理。
-#   3) 只删 codex-proxy-rs:client:*:active；:requests 是每分钟计数窗口、TTL 很短，不动它。
+#   3) 只对数据库证明 started_at 早于这次网关启动的成员做 ZREM。
+#      新请求、尚未落库的准入成员保留；不删除整个 active 集合，不动 RPM 窗口。
 #
 # 由 12_stack_selfheal_watchdog_20260929.sh 每分钟调用；也可手工运行。
 # 日志：.runtime/restart-slot-cleanup.log（同时输出到 stdout，看门狗会落到 watchdog.log）
@@ -23,12 +24,13 @@ PODMAN=/usr/bin/podman
 CURL=/usr/bin/curl
 CONTAINER=${CPR_SLOT_CLEANUP_CONTAINER:-codex-proxy-rs_codex-proxy-rs_1}
 REDIS_CONTAINER=${CPR_SLOT_CLEANUP_REDIS_CONTAINER:-codex-proxy-rs_redis_1}
+POSTGRES_CONTAINER=${CPR_SLOT_CLEANUP_POSTGRES_CONTAINER:-codex-proxy-rs_postgres_1}
 GATEWAY_URL=${CPR_SLOT_CLEANUP_GATEWAY_URL:-http://127.0.0.1:18082/healthz}
 PATTERN=${CPR_SLOT_CLEANUP_PATTERN:-codex-proxy-rs:client:*:active}
 # 容器已运行超过该秒数即判定为“不是刚重启”：即使状态文件缺失也不清槽位。
 MAX_AGE_SECONDS=${CPR_SLOT_CLEANUP_MAX_AGE_SECONDS:-900}
 WAIT_SECONDS=${CPR_SLOT_CLEANUP_WAIT_SECONDS:-180}
-STATE=/run/user/$(id -u)/cpr-gateway-started-at
+STATE=${CPR_SLOT_CLEANUP_STATE:-/run/user/$(id -u)/cpr-gateway-started-at}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LOG=${CPR_SLOT_CLEANUP_LOG:-$SCRIPT_DIR/../.runtime/restart-slot-cleanup.log}
 
@@ -40,8 +42,8 @@ log() {
 }
 
 started_at() { $PODMAN inspect --format '{{.State.StartedAt}}' "$CONTAINER" 2>/dev/null || true; }
-# 只取到秒，避免 Go 时间格式的小数位与尾部时区名影响 date 解析。
-started_at_epoch() { date -d "${1:0:19}" +%s 2>/dev/null || true; }
+# 保留时间偏移；Podman StartedAt 与数据库都使用带时区时间。
+started_at_epoch() { date -d "$1" +%s 2>/dev/null; }
 healthz_code() { $CURL -s -m 5 -o /dev/null -w '%{http_code}' "$GATEWAY_URL" 2>/dev/null || true; }
 
 redis_password() {
@@ -55,18 +57,31 @@ redis_cli() {
 }
 
 clear_stale_client_slots() {
-  local password keys key members released=0
-  password=$(redis_password)
+  local current=$1 password keys key members stale member removed released=0
+  password=$(redis_password) || return 1
   if [ -z "${password:-}" ]; then log "取不到 Redis 口令，跳过清理"; return 1; fi
-  keys=$(redis_cli "$password" "--scan --pattern '$PATTERN'")
+  keys=$(redis_cli "$password" "--scan --pattern '$PATTERN'") || return 1
   if [ -z "${keys:-}" ]; then log "没有残留 Key 并发槽位"; return 0; fi
   for key in $keys; do
-    members=$(redis_cli "$password" "ZCARD '$key'")
-    redis_cli "$password" "DEL '$key'" >/dev/null
-    log "释放 $key（成员 ${members:-0} 个）"
-    released=$((released + 1))
+    members=$(redis_cli "$password" "ZRANGE '$key' 0 -1") || return 1
+    [ -n "$members" ] || continue
+    stale=$($PODMAN exec -i "$POSTGRES_CONTAINER" sh -c '
+      PGPASSWORD="$POSTGRES_PASSWORD" exec psql -XAt -v ON_ERROR_STOP=1 \
+        -U "$POSTGRES_USER" -d "$POSTGRES_DB" --set=members="$1" --set=started="$2"
+    ' sh "$members" "$current" <<'SQL'
+SELECT id FROM model_requests
+WHERE started_at < :'started'::timestamptz
+  AND id = ANY(string_to_array(:'members', E'\n'));
+SQL
+    ) || return 1
+    # 清理期间若再次重建，留给下一次检查按新启动边界处理。
+    if [ "$(started_at)" != "$current" ]; then log "启动边界已变化，停止本轮清理"; return 1; fi
+    for member in $stale; do
+      removed=$(redis_cli "$password" "ZREM '$key' '$member'") || return 1
+      released=$((released + removed))
+    done
   done
-  log "清理完成：释放 ${released} 个 Key 的并发槽位"
+  log "清理完成：释放 ${released} 个重启前请求的槽位；新请求及未确认成员保留"
 }
 
 main() {
@@ -76,10 +91,12 @@ main() {
   previous=$(cat "$STATE" 2>/dev/null || true)
   [ "$current" = "$previous" ] && exit 0
   now=$(date +%s)
-  age=$(( now - $(started_at_epoch "$current") ))
-  printf '%s\n' "$current" >"$STATE" 2>/dev/null || true
+  local epoch
+  epoch=$(started_at_epoch "$current") || { log "启动时间无法解析，未清理"; exit 1; }
+  age=$(( now - epoch ))
   if [ "$age" -gt "$MAX_AGE_SECONDS" ]; then
     log "网关容器启动于 ${age}s 前（> ${MAX_AGE_SECONDS}s），不是刚重建，只记录状态"
+    printf '%s\n' "$current" >"$STATE"
     exit 0
   fi
   log "检测到网关容器重建（启动于 ${age}s 前），等待 healthz 后清理残留槽位"
@@ -94,7 +111,12 @@ main() {
     2??) ;;
     *) log "等待 healthz 超时（最后状态码 ${code:-000}），本轮不清理"; exit 0 ;;
   esac
-  clear_stale_client_slots || true
+  if clear_stale_client_slots "$current"; then
+    printf '%s\n' "$current" >"$STATE"
+  else
+    log "清理失败，未推进启动标记；下次检查重试"
+    exit 1
+  fi
 }
 
 main "$@"
