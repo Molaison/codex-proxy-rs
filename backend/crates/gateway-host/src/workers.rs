@@ -560,6 +560,7 @@ async fn supervise_daemon(
     health: Arc<WorkerHealthRegistry>,
 ) {
     let mut backoff = restart.initial_backoff();
+    let mut recovering = false;
     loop {
         if cancellation.is_cancelled() {
             break;
@@ -568,12 +569,27 @@ async fn supervise_daemon(
         let daemon_cancel = CancellationToken::new();
         let run = AssertUnwindSafe(task.run(daemon_cancel.clone())).catch_unwind();
         tokio::pin!(run);
-        let result = tokio::select! {
-            result = &mut run => Some(result),
-            () = cancellation.cancelled() => {
-                daemon_cancel.cancel();
-                let _ = run.await;
-                None
+        let stable_run = tokio::time::sleep(restart.initial_backoff());
+        tokio::pin!(stable_run);
+        let result = loop {
+            tokio::select! {
+                result = &mut run => break Some(result),
+                () = cancellation.cancelled() => {
+                    daemon_cancel.cancel();
+                    let _ = run.await;
+                    break None;
+                }
+                () = &mut stable_run, if recovering => {
+                    // 长驻任务正常运行不会返回；稳定运行一个初始退避周期后才能清掉旧失败。
+                    // 保留 last_failure_at，且不伪造 completed_cycles 或 last_success_at。
+                    health.update(&id, |state| {
+                        state.consecutive_failures = 0;
+                        state.last_error = None;
+                    });
+                    backoff = restart.initial_backoff();
+                    recovering = false;
+                    tracing::info!(worker = %id, "长驻任务恢复稳定运行");
+                }
             }
         };
         let Some(result) = result else { break };
@@ -584,6 +600,7 @@ async fn supervise_daemon(
         };
         let delay = take_backoff(&mut backoff, restart.maximum_backoff());
         let failures = health.failed(&id, error.clone());
+        recovering = true;
         tracing::warn!(
             worker = %id,
             failures,

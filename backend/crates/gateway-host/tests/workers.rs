@@ -701,6 +701,47 @@ async fn running_worker_becomes_unhealthy_when_last_success_is_stale() {
     supervisor.shutdown(Duration::from_millis(10)).await;
 }
 
+#[tokio::test(start_paused = true)]
+async fn daemon_recovery_clears_stale_health_without_erasing_crash_backoff() {
+    struct FlakyDaemon(Arc<AtomicUsize>);
+    impl gateway_core::task::DaemonTask for FlakyDaemon {
+        fn run(&self, cancellation: CancellationToken) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+            Box::pin(async move {
+                if self.0.fetch_add(1, Ordering::SeqCst) < 2 {
+                    return Err(WorkerTaskError::safe("temporary backup settings failure"));
+                }
+                cancellation.cancelled().await;
+                Ok(())
+            })
+        }
+    }
+    let starts = Arc::new(AtomicUsize::new(0));
+    let id = WorkerId::try_new(WorkerKind::Backup, "backup").unwrap();
+    let registration = WorkerRegistration::try_new(id.clone(), WorkerRunnable::Daemon {
+        restart: gateway_core::task::DaemonRestartPolicy::try_new(
+            Duration::from_millis(10), Duration::from_millis(40),
+        ).unwrap(),
+        task: Box::new(FlakyDaemon(starts.clone())),
+    }).unwrap();
+    let supervisor = supervisor();
+    supervisor.start(complete_plan(vec![WorkerContribution::Registration(registration)]),
+        Arc::new(FakeLeasePort::default())).unwrap();
+    yield_until(|| task_health(&supervisor, &id).consecutive_failures == 1).await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    yield_until(|| task_health(&supervisor, &id).consecutive_failures == 2).await;
+    tokio::time::advance(Duration::from_millis(20)).await;
+    yield_until(|| starts.load(Ordering::SeqCst) == 3).await;
+    assert_eq!(task_health(&supervisor, &id).consecutive_failures, 2);
+    tokio::time::advance(Duration::from_millis(10)).await;
+    yield_until(|| task_health(&supervisor, &id).consecutive_failures == 0).await;
+    let health = task_health(&supervisor, &id);
+    assert_eq!(health.state, WorkerRuntimeState::Running);
+    assert!(health.last_failure_at.is_some());
+    assert!(health.last_error.is_none());
+    assert_eq!(health.completed_cycles, 0);
+    supervisor.shutdown(Duration::from_secs(1)).await;
+}
+
 fn supervisor() -> WorkerSupervisor {
     WorkerSupervisor::new(CancellationToken::new())
 }
