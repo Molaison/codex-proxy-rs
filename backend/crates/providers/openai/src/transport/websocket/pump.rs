@@ -504,7 +504,25 @@ async fn pump_loop(
                     break 'pump reason;
                 }
             }
-            message = inner.stream.next() => {
+            message = async {
+                // 写入阻塞恢复后，已到达的 Pong/业务帧与过期 deadline 会同时就绪；
+                // 只在“读取 vs 超时”之间排序，让健康帧先被处理。外层命令与 ticker
+                // 仍保持公平调度，超时长度、错误分类和关闭帧语义都不变。
+                tokio::select! {
+                    biased;
+                    message = inner.stream.next() => Ok(message),
+                    _ = wait_until(pong_deadline) => Err(PumpExitReason::PongTimeout {
+                        timeout: ping_timeout.expect("pending ping must have a timeout"),
+                    }),
+                    _ = wait_until(liveness_deadline) => Err(PumpExitReason::LivenessTimeout {
+                        timeout: liveness_timeout.expect("liveness deadline must have a timeout"),
+                    }),
+                }
+            } => {
+                let message = match message {
+                    Ok(message) => message,
+                    Err(reason) => break 'pump reason,
+                };
                 match message {
                     None => break 'pump PumpExitReason::UpstreamEof,
                     Some(Ok(message)) => {
@@ -586,16 +604,6 @@ async fn pump_loop(
                         Err(reason) => break 'pump reason,
                     }
                 }
-            }
-            _ = wait_until(pong_deadline) => {
-                break 'pump PumpExitReason::PongTimeout {
-                    timeout: ping_timeout.expect("pending ping must have a timeout"),
-                };
-            }
-            _ = wait_until(liveness_deadline) => {
-                break 'pump PumpExitReason::LivenessTimeout {
-                    timeout: liveness_timeout.expect("liveness deadline must have a timeout"),
-                };
             }
         }
     };
