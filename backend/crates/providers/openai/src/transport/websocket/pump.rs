@@ -509,7 +509,24 @@ async fn pump_loop(
                     break 'pump reason;
                 }
             }
-            message = inner.stream.next() => {
+            message = async {
+                // 写入阻塞期间帧与 deadline 可能同时就绪，先读取已到达的健康证据
+                // 只在读取与超时之间排序，外层命令和 ticker 仍保持公平调度
+                tokio::select! {
+                    biased;
+                    message = inner.stream.next() => Ok(message),
+                    _ = wait_until(pong_deadline) => Err(PumpExitReason::PongTimeout {
+                        timeout: ping_timeout.expect("pending ping must have a timeout"),
+                    }),
+                    _ = wait_until(liveness_deadline) => Err(PumpExitReason::LivenessTimeout {
+                        timeout: liveness_timeout.expect("liveness deadline must have a timeout"),
+                    }),
+                }
+            } => {
+                let message = match message {
+                    Ok(message) => message,
+                    Err(reason) => break 'pump reason,
+                };
                 match message {
                     None => break 'pump PumpExitReason::UpstreamEof,
                     Some(Ok(message)) => {
@@ -591,16 +608,6 @@ async fn pump_loop(
                         Err(reason) => break 'pump reason,
                     }
                 }
-            }
-            _ = wait_until(pong_deadline) => {
-                break 'pump PumpExitReason::PongTimeout {
-                    timeout: ping_timeout.expect("pending ping must have a timeout"),
-                };
-            }
-            _ = wait_until(liveness_deadline) => {
-                break 'pump PumpExitReason::LivenessTimeout {
-                    timeout: liveness_timeout.expect("liveness deadline must have a timeout"),
-                };
             }
         }
     };
