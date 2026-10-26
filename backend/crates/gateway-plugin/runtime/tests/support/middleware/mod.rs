@@ -201,13 +201,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut output = call.next.run(()).await.unwrap();
                         assert_eq!(output.config_revision, nested.config_revision);
                         if mode == "rewrite" {
-                            output.refresh_margin_seconds = 4321;
+                            output.request_interval_ms = 4321;
                         }
                         return ServiceResponse::from_result::<settings::Load>(Ok(output));
                     }
                     if call.is::<settings::Replace>() {
                         let mut call = call.into_typed::<settings::Replace>()?;
-                        call.input.1.refresh_margin_seconds = 1234;
+                        call.input.1.request_interval_ms = 1234;
                         return ServiceResponse::from_result::<settings::Replace>(
                             call.next.run(call.input).await,
                         );
@@ -323,7 +323,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             assert!(call.request.settings["min_codex_cli_version"].is_null());
                             call.request.settings["min_codex_cli_version"] =
                                 serde_json::json!("0.40.0");
-                            call.request.settings["max_account_rotations"] = serde_json::json!(0);
+                            call.request.settings["request_interval_ms"] = serde_json::json!(0);
                         } else {
                             assert_eq!(call.request.timeout_ms, Some(90_000));
                             assert_eq!(

@@ -51,9 +51,35 @@ pub(super) struct MappedProviderFailure {
     pub(super) rate_limit_headers: Vec<(String, String)>,
     pub(super) observation: Option<ProviderResponseObservation>,
     pub(super) capture_response_cookies: bool,
+    request_local_retry_delay: Option<Duration>,
 }
 
 impl MappedProviderFailure {
+    pub(super) fn apply_request_local_retry(
+        mut self,
+        enabled: bool,
+        replay_boundary: ReplayBoundary,
+    ) -> Self {
+        let Some(initial_delay) = enabled.then_some(self.request_local_retry_delay).flatten()
+        else {
+            return self;
+        };
+        self.account_failure = None;
+        self.upstream_capacity_failure = false;
+        if replay_boundary.permits_provider_proof()
+            && self.error.send_state() != UpstreamSendState::Ambiguous
+        {
+            self.error = self.error.with_replay_safe().with_transient_retry(
+                NonZeroU32::new(5).unwrap_or(NonZeroU32::MIN),
+                initial_delay,
+                Duration::from_secs(60),
+                Duration::ZERO,
+                TransientRetryPolicy::RetryThenReturnError,
+            );
+        }
+        self
+    }
+
     pub(super) fn plain(error: ProviderError) -> Self {
         Self {
             error,
@@ -66,6 +92,7 @@ impl MappedProviderFailure {
             rate_limit_headers: Vec::new(),
             observation: None,
             capture_response_cookies: false,
+            request_local_retry_delay: None,
         }
     }
 }
@@ -715,6 +742,7 @@ pub(super) fn map_canonical_error(
     diagnostics: &CodexUpstreamDiagnostics,
     rate_limit_headers: &[(String, String)],
     replay_boundary: ReplayBoundary,
+    request_local_retry: bool,
 ) -> MappedProviderFailure {
     match error {
         CodexCanonicalError::Protocol(error) => MappedProviderFailure::plain(error),
@@ -729,7 +757,7 @@ pub(super) fn map_canonical_error(
             ),
             None,
             replay_boundary,
-        ),
+        ).apply_request_local_retry(request_local_retry, replay_boundary),
     }
 }
 
@@ -1350,13 +1378,15 @@ pub(super) fn map_upstream_failure(
     let category = failure.category();
     let capacity_unavailable = category == CodexFailureCategory::CapacityUnavailable;
     let retry_policy = transient_retry_policy(category, &failure);
+    let request_local_retry_delay = failure.request_local_retry_delay();
+    let encrypted_replay_rejected = failure.upstream_code().is_some_and(is_encrypted_replay_failure_code);
     let cyber_policy_failure = failure
         .status
         .is_some_and(|status| status.is_client_error())
         && is_cyber_policy_code(failure.code.as_deref());
     let continuation_failure = failure
         .upstream_code()
-        .filter(|code| is_history_failure_code(code))
+        .filter(|code| is_history_failure_code(code) && !is_encrypted_replay_failure_code(code))
         .map(|_| ContinuationFailure::HistoryUnavailable);
     let send_state = upstream_send_state(failure.send_phase);
     let error_kind = if continuation_failure.is_some() {
@@ -1416,12 +1446,15 @@ pub(super) fn map_upstream_failure(
     if let Some(retry_after) = failure.retry_after_seconds.map(Duration::from_secs) {
         error = error.with_retry_after(retry_after);
     }
+    if encrypted_replay_rejected && replay_boundary.permits_provider_proof() {
+        error = error.with_replay_safe().with_transient_retry(NonZeroU32::MIN, Duration::from_millis(250), Duration::from_secs(2), Duration::ZERO, TransientRetryPolicy::RetryThenReturnError);
+    }
     if let Some(policy) = retry_policy
         && error.replay_is_safe()
     {
         let (max_retries, max_delay, jitter) = match policy {
             TransientRetryPolicy::RetryThenRotateAccount => {
-                (3, Duration::from_secs(8), Duration::ZERO)
+                (8, Duration::from_secs(60), Duration::ZERO)
             }
             // 服务故障只在原账号恢复，以较短的等待上限控制总延迟，并逐次采样分散重试
             TransientRetryPolicy::RetryThenReturnError => (
@@ -1458,11 +1491,12 @@ pub(super) fn map_upstream_failure(
     MappedProviderFailure {
         error,
         websocket_transport_retryable: false,
-        account_failure: account_failure(
+        account_failure: if encrypted_replay_rejected { None } else { account_failure(
             category,
             failure.retry_after_seconds,
             failure.usage_limit_resets_at,
-        ),
+        ) },
+        request_local_retry_delay,
         error_message: failure.client_message,
         cyber_policy_failure,
         // 普通 5xx 与未知流内错误不足以证明容量拒绝，不能用于冻结账号
@@ -1479,6 +1513,10 @@ pub(super) fn map_upstream_failure(
 
 pub(super) fn is_cyber_policy_code(code: Option<&str>) -> bool {
     code.is_some_and(|code| code.trim().eq_ignore_ascii_case("cyber_policy"))
+}
+
+pub(super) fn is_encrypted_replay_failure_code(code: &str) -> bool {
+    code.trim().eq_ignore_ascii_case("invalid_encrypted_content")
 }
 
 pub(super) fn is_history_failure_code(code: &str) -> bool {

@@ -73,6 +73,7 @@ impl CompiledSettings {
         let account_selection_policy = AccountSelectionPolicy::new(
             strategy,
             AccountConcurrency::new(settings.max_concurrent_per_account),
+            Duration::from_millis(settings.request_interval_ms),
         )
         .with_openai_guardian_reserved_concurrency(settings.openai_guardian_reserved_concurrency)
         .with_openai_account_affinity(settings.openai_account_affinity)

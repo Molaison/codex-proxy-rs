@@ -80,6 +80,21 @@ impl MemoryAccountStore {
             .expect("seed test OAuth credential");
     }
 
+    pub(crate) fn set_api_key_request_local_retry(&self, id: &str, enabled: bool) {
+        use provider_openai::credential::{CodexCredentialCodec, CodexCredentialData};
+        let mut accounts = self.accounts.lock().unwrap();
+        let stored = accounts
+            .get_mut(&ProviderAccountId::new(id).unwrap())
+            .unwrap();
+        let mut credential_data =
+            CodexCredentialCodec::decode_complete(&stored.credential).unwrap();
+        let CodexCredentialData::ApiKey(data) = &mut credential_data else {
+            panic!("API-key credential");
+        };
+        data.request_local_retry = enabled;
+        stored.credential = CodexCredentialCodec::encode_complete(credential_data).unwrap();
+    }
+
     pub(crate) fn set_oauth_transport(
         &self,
         id: &str,
@@ -109,6 +124,8 @@ impl MemoryAccountStore {
                     base_url,
                     api_key: "sk-api-test-only".to_owned(),
                     transport,
+                    request_local_retry: false,
+                    forward_client_identity: false,
                 },
             ),
         )
@@ -136,6 +153,22 @@ impl MemoryAccountStore {
         })
         .await
         .expect("seed API account");
+    }
+
+    pub(crate) fn set_forward_client_identity(&self, id: &str, enabled: bool) {
+        use provider_openai::credential::{CodexCredentialCodec, CodexCredentialData};
+        let mut accounts = self.accounts.lock().unwrap();
+        let stored = accounts
+            .get_mut(&ProviderAccountId::new(id).unwrap())
+            .unwrap();
+        let CodexCredentialData::ApiKey(mut data) =
+            CodexCredentialCodec::decode_complete(&stored.credential).unwrap()
+        else {
+            panic!("API key expected")
+        };
+        data.forward_client_identity = enabled;
+        stored.credential =
+            CodexCredentialCodec::encode_complete(CodexCredentialData::ApiKey(data)).unwrap();
     }
 
     pub(crate) fn account(&self, id: &str) -> Option<ProviderAccount> {
@@ -1128,6 +1161,7 @@ pub(crate) fn account_policy() -> gateway_core::account::AccountSelectionPolicy 
     gateway_core::account::AccountSelectionPolicy::new(
         gateway_core::account::RotationStrategy::Smart,
         NonZeroU32::new(2).expect("nonzero concurrency"),
+        Duration::from_millis(10),
     )
     .with_openai_account_affinity(gateway_core::account::AccountAffinity::Strict)
 }

@@ -272,6 +272,9 @@ impl AffinitySelection {
             PreferredAccountSelection::Blocked(AccountSchedulingBlocker::ConcurrencyLimit) => {
                 self.escape(AffinityEscapeReason::LeaseSaturated);
             }
+            PreferredAccountSelection::Blocked(AccountSchedulingBlocker::RequestInterval) => {
+                self.escape(AffinityEscapeReason::Cooldown);
+            }
             PreferredAccountSelection::Blocked(AccountSchedulingBlocker::LowerWeight) => {
                 self.escape(AffinityEscapeReason::HigherPriority);
             }
@@ -715,8 +718,14 @@ impl CodexCredentialSelector {
                     AccountCandidate { account, signals }
                 })
                 .collect::<Vec<_>>();
+            // Inherit only a preference; CAS still compares the child's own missing record.
+            let inherited = if binding.is_none() && !diagnostic {
+                if let Some(root) = request.session_affinity_observation.and_then(CodexSessionAffinity::root_key) {
+                    self.lookup_session_affinity(root).await?
+                } else { None }
+            } else { None };
             let mut affinity = binding
-                .as_ref()
+                .as_ref().or(inherited.as_ref())
                 .filter(|_| affinity_mode != AccountAffinity::Relaxed)
                 .map_or_else(AffinitySelection::default, |binding| {
                     affinity_selection_for_bound_account(
@@ -805,6 +814,7 @@ impl CodexCredentialSelector {
                 let preferred_wait = preferred.as_ref().filter(|account| {
                     !diagnostic
                         && (affinity_mode == AccountAffinity::Strict || pinned_account.is_some())
+                        && (pinned_account.is_some() || inherited.is_none())
                         && queue_policy.max_waiting > 0
                         && wait_candidates.contains(account)
                 });
@@ -858,6 +868,7 @@ impl CodexCredentialSelector {
                             selection.preferred(),
                             PreferredAccountSelection::Blocked(
                                 AccountSchedulingBlocker::ConcurrencyLimit
+                                    | AccountSchedulingBlocker::RequestInterval
                             )
                         )
                 });
@@ -949,7 +960,7 @@ impl CodexCredentialSelector {
                     .ok_or(CredentialSelectionError::InvalidCredential(None))?;
                 // 凭据、状态或额度结论的并发更新会使账号快照失效，必须重新选号并校验资格；
                 // 仅额度观测时刻前进时沿用最新快照
-                // 在占用租约前完成校验，避免重读被自己的异步释放挡住
+                // 在占用租约和请求间隔前完成校验，避免重读被自己的异步释放挡住
                 let (account, runtime) = match self
                     .repository
                     .reload_selected_credential(&account)
@@ -976,6 +987,7 @@ impl CodexCredentialSelector {
                             account.id().clone(),
                             account.revision(),
                             context.concurrency_limit(&account),
+                            policy.request_interval(),
                             request.attempt.deadline(),
                         )
                         .with_metadata(request.attempt.lease_metadata())
@@ -1012,7 +1024,8 @@ impl CodexCredentialSelector {
                             drop(guard);
                             continue 'capacity;
                         }
-                        let affinity_telemetry = affinity.telemetry(account.id());
+                        let mut affinity_telemetry = affinity.telemetry(account.id());
+                        affinity_telemetry.affinity_hit &= inherited.is_none();
                         let affinity_observation = request.session_affinity_observation;
                         tracing::info!(
                             request_id = %request.attempt.request_id(),

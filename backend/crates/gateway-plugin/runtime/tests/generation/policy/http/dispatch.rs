@@ -395,7 +395,14 @@ async fn active_http_children_inherit_settings_and_preserve_override_sources() {
     let baseline = RequestSettings::new(Arc::new(
         RuntimeSnapshot::new(
             ConfigRevision::new(1).unwrap(),
-            gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+            gateway_core::settings::SettingsValues::new(
+                1,
+                10,
+                "smart",
+                Default::default(),
+                None,
+                None,
+            ),
             vec![],
             vec![],
             vec![],
@@ -432,7 +439,7 @@ async fn active_http_children_inherit_settings_and_preserve_override_sources() {
             final_settings["responses_max_decompressed_body_bytes"],
             8192
         );
-        assert_eq!(final_settings["max_account_rotations"], 0);
+        assert_eq!(final_settings["request_interval_ms"], 0);
         assert!(final_settings["min_codex_cli_version"].is_null());
         let sources = effective.inspect();
         assert_eq!(
@@ -440,14 +447,14 @@ async fn active_http_children_inherit_settings_and_preserve_override_sources() {
             "dispatch-b"
         );
         assert_eq!(
-            sources["overrides"]["max_account_rotations"]["instance_id"],
+            sources["overrides"]["request_interval_ms"]["instance_id"],
             "dispatch-a"
         );
         assert!(
             sources["overrides"]["min_codex_cli_version"]["order"]
                 .as_u64()
                 .unwrap()
-                > sources["overrides"]["max_account_rotations"]["order"]
+                > sources["overrides"]["request_interval_ms"]["order"]
                     .as_u64()
                     .unwrap()
         );

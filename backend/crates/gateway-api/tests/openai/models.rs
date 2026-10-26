@@ -160,6 +160,15 @@ impl ExecutionService for ModelsExecution {
     }
 
     fn public_models(&self, client: &AuthenticatedClient) -> Vec<PublicModelId> {
+        if let Some(Ok(native)) = &self.native {
+            return native
+                .iter()
+                .map(|entry| match entry {
+                    PublicModelDescriptor::Native { model, .. } => model.clone(),
+                    PublicModelDescriptor::Adapted(profile) => profile.model().clone(),
+                })
+                .collect();
+        }
         ["model-a", "model-b"]
             .into_iter()
             .map(|model| PublicModelId::new(client.snapshot().mapped_model(model)).expect("model"))
@@ -167,7 +176,7 @@ impl ExecutionService for ModelsExecution {
     }
 
     fn contains_public_model(&self, _: &AuthenticatedClient, model: &PublicModelId) -> bool {
-        matches!(model.as_str(), "model-a" | "model-b")
+        self.public_models(&self.client).contains(model)
     }
 
     fn start(&self, _: StartExecution) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
@@ -697,4 +706,335 @@ async fn models_should_authenticate_before_applying_the_version_gate() {
         .expect("unauthenticated models response");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+fn web_roster_execution(rows: Vec<serde_json::Value>) -> Arc<ModelsExecution> {
+    Arc::new(ModelsExecution {
+        client: authenticated_client("sk_models_test"),
+        presentation: None,
+        native: Some(Ok(rows
+            .into_iter()
+            .map(|row| PublicModelDescriptor::Native {
+                model: PublicModelId::new(row["slug"].as_str().unwrap()).unwrap(),
+                payload: gateway_core::operation::RawJsonPayload::new(
+                    "codex",
+                    serde_json::to_vec(&row).unwrap().into(),
+                )
+                .unwrap(),
+            })
+            .collect())),
+        requested_versions: Mutex::default(),
+        middleware: None,
+    })
+}
+
+fn web_roster_row(slug: &str, efforts: &[&str], window: u64, compact: u64) -> serde_json::Value {
+    serde_json::json!({
+        "slug": slug, "visibility": "list", "priority": 7,
+        "supported_reasoning_levels": efforts.iter().map(|effort| serde_json::json!({"effort": effort})).collect::<Vec<_>>(),
+        "context_window": window, "max_context_window": window, "auto_compact_token_limit": compact,
+        "base_instructions": slug, "apply_patch_tool_type": if slug.ends_with("-tools") { Some("freeform") } else { None },
+        "future_field": {"preserved": true}
+    })
+}
+
+async fn web_roster_catalog(execution: Arc<ModelsExecution>) -> serde_json::Value {
+    let response = api_router(execution)
+        .await
+        .oneshot(authorized_request("/v1/models?client_version=0.162.1"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn web_roster_catalog_has_ordered_modes_minimum_budgets_and_full_template() {
+    let non_web = web_roster_row("native-model", &["high"], 400_000, 350_000);
+    let mut other_non_web = web_roster_row("vendor/chatgpt-web/model", &["low"], 80_000, 60_000);
+    other_non_web["visibility"] = serde_json::json!("hide");
+    let mut rows = vec![non_web.clone()];
+    for family in ["5.6", "6"] {
+        for (backend, efforts, window, compact) in [
+            ("sol", vec!["medium", "high", "xhigh"], 240_000, 220_000),
+            ("pro", vec!["max"], 336_579, 285_000),
+        ] {
+            rows.push(web_roster_row(
+                &format!("chatgpt-web/gpt-{family}-{backend}"),
+                &efforts,
+                111_193,
+                95_000,
+            ));
+            rows.push(web_roster_row(
+                &format!("chatgpt-web/gpt-{family}-{backend}-tools"),
+                &efforts,
+                window,
+                compact,
+            ));
+        }
+    }
+    rows.push(web_roster_row(
+        "chatgpt-web/gpt-6-sol-instant",
+        &["none"],
+        10_000,
+        8_000,
+    ));
+    rows.push(web_roster_row(
+        "chatgpt-web/gpt-6",
+        &["high"],
+        10_000,
+        8_000,
+    ));
+    rows.push(other_non_web.clone());
+    let value = web_roster_catalog(web_roster_execution(rows)).await;
+    let models = value["models"].as_array().unwrap();
+    assert_eq!(models[0], non_web);
+    assert_eq!(models[1], other_non_web);
+    assert_eq!(models.len(), 10);
+    let mut index = 0;
+    for family in ["5.6", "6"] {
+        for mode in ["chat", "tools"] {
+            for persistence in ["persist", "temp"] {
+                let model = &models[index + 2];
+                assert_eq!(
+                    model["slug"],
+                    format!("chatgpt-web/gpt-{family}-{mode}-{persistence}")
+                );
+                assert_eq!(model["priority"], index);
+                let suffix = if mode == "tools" { "-tools" } else { "" };
+                assert_eq!(
+                    model["base_instructions"],
+                    format!("chatgpt-web/gpt-{family}-sol{suffix}")
+                );
+                assert_eq!(
+                    model["apply_patch_tool_type"],
+                    serde_json::json!(if mode == "tools" {
+                        Some("freeform")
+                    } else {
+                        None
+                    })
+                );
+                assert_eq!(
+                    model["future_field"],
+                    serde_json::json!({"preserved": true})
+                );
+                let window = if mode == "tools" { 240_000 } else { 111_193 };
+                assert_eq!(model["context_window"], window);
+                assert_eq!(model["max_context_window"], window);
+                assert_eq!(
+                    model["auto_compact_token_limit"],
+                    if mode == "tools" { 220_000 } else { 95_000 }
+                );
+                assert_eq!(model["default_reasoning_level"], "xhigh");
+                assert_eq!(
+                    model["supported_reasoning_levels"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|row| row["effort"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    ["high", "xhigh", "max"]
+                );
+                index += 1;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn web_roster_catalog_does_not_add_unauthorized_modes_or_unsupported_strengths() {
+    let value = web_roster_catalog(web_roster_execution(vec![
+        web_roster_row(
+            "chatgpt-web/gpt-6-sol",
+            &["medium", "high"],
+            111_193,
+            95_000,
+        ),
+        web_roster_row("chatgpt-web/gpt-6-pro", &["low"], 10_000, 8_000),
+        web_roster_row("chatgpt-web/gpt-5.6-sol-tools", &["low"], 240_000, 220_000),
+    ]))
+    .await;
+    let models = value["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    for (model, persistence) in models.iter().zip(["persist", "temp"]) {
+        assert_eq!(
+            model["slug"],
+            format!("chatgpt-web/gpt-6-chat-{persistence}")
+        );
+        assert!(model["apply_patch_tool_type"].is_null());
+        assert_eq!(model["default_reasoning_level"], "high");
+        assert_eq!(model["context_window"], 111_193);
+        assert_eq!(
+            model["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["effort"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["high"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn web_roster_plain_list_and_detail_hide_old_ids_and_require_source_access() {
+    let execution = web_roster_execution(vec![
+        web_roster_row("chatgpt-web/gpt-6-sol", &["high"], 111_193, 95_000),
+        web_roster_row(
+            "chatgpt-web/gpt-5.6-tools-persist",
+            &["high"],
+            240_000,
+            220_000,
+        ),
+        web_roster_row("chatgpt-web/gpt-6", &["high"], 111_193, 95_000),
+    ]);
+    let router = api_router(execution).await;
+    let response = router
+        .clone()
+        .oneshot(authorized_request("/v1/models"))
+        .await
+        .unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(
+        value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "chatgpt-web/gpt-6-chat-persist",
+            "chatgpt-web/gpt-6-chat-temp"
+        ]
+    );
+    for (id, status) in [
+        ("chatgpt-web%2Fgpt-6-chat-persist", StatusCode::OK),
+        ("chatgpt-web%2Fgpt-6-chat-temp", StatusCode::OK),
+        ("chatgpt-web%2Fgpt-6-tools-persist", StatusCode::NOT_FOUND),
+        ("chatgpt-web%2Fgpt-6-tools-temp", StatusCode::NOT_FOUND),
+        ("chatgpt-web%2Fgpt-5.6-tools-persist", StatusCode::NOT_FOUND),
+        ("chatgpt-web%2Fgpt-6", StatusCode::NOT_FOUND),
+        ("chatgpt-web%2Fgpt-6-sol", StatusCode::NOT_FOUND),
+        ("chatgpt-web%2Fgpt-5.6", StatusCode::NOT_FOUND),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(authorized_request(&format!("/v1/models/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{id}");
+    }
+}
+
+#[tokio::test]
+async fn web_roster_pro_tools_only_preserves_its_authorized_full_template() {
+    let value = web_roster_catalog(web_roster_execution(vec![
+        web_roster_row("chatgpt-web/gpt-6-sol", &["high"], 111_193, 95_000),
+        web_roster_row("chatgpt-web/gpt-6-pro-tools", &["max"], 336_579, 285_000),
+    ]))
+    .await;
+    let models = value["models"].as_array().unwrap();
+    assert_eq!(models.len(), 4);
+    for persistence in ["persist", "temp"] {
+        let model = models
+            .iter()
+            .find(|row| row["slug"] == format!("chatgpt-web/gpt-6-tools-{persistence}"))
+            .unwrap();
+        assert_eq!(model["base_instructions"], "chatgpt-web/gpt-6-pro-tools");
+        assert_eq!(model["apply_patch_tool_type"], "freeform");
+        assert_eq!(model["context_window"], 336_579);
+        assert_eq!(model["auto_compact_token_limit"], 285_000);
+        assert_eq!(model["default_reasoning_level"], "max");
+        assert_eq!(
+            model["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["effort"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["max"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn web_roster_invalid_effort_returns_http_400_before_execution() {
+    for (model, effort) in [
+        ("chatgpt-web/gpt-6", "high"),
+        ("chatgpt-web/gpt-6-tools-persist", "pro"),
+        ("chatgpt-web/gpt-5.6-chat-temp", "medium"),
+    ] {
+        let response = api_router(ModelsExecution::new()).await.oneshot(
+            Request::post("/v1/responses")
+                .header(AUTHORIZATION, "Bearer sk_models_test")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"model": model, "reasoning": {"effort": effort}, "input": "hello"}).to_string())).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(value["error"]["param"], "reasoning.effort");
+    }
+}
+
+#[tokio::test]
+async fn web_roster_plain_catalog_preserves_non_web_order_and_mode_details() {
+    let execution = web_roster_execution(vec![
+        web_roster_row("native-model", &["high"], 400_000, 350_000),
+        web_roster_row("chatgpt-web/gpt-5.6-pro-tools", &["max"], 336_579, 285_000),
+        web_roster_row("vendor/chatgpt-web/model", &["low"], 80_000, 60_000),
+        web_roster_row("chatgpt-web/gpt-6-sol", &["high", "xhigh"], 111_193, 95_000),
+        web_roster_row("chatgpt-web/gpt-6-sol-instant", &["none"], 10_000, 8_000),
+    ]);
+    let router = api_router(execution).await;
+    let response = router
+        .clone()
+        .oneshot(authorized_request("/v1/models"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let expected_ids = [
+        "native-model",
+        "vendor/chatgpt-web/model",
+        "chatgpt-web/gpt-5.6-tools-persist",
+        "chatgpt-web/gpt-5.6-tools-temp",
+        "chatgpt-web/gpt-6-chat-persist",
+        "chatgpt-web/gpt-6-chat-temp",
+    ];
+    assert_eq!(
+        value,
+        serde_json::json!({"object": "list", "data": expected_ids.map(|id| serde_json::json!({"id": id, "object": "model", "created": 1_700_000_000_i64, "owned_by": "gateway"}))})
+    );
+    for id in expected_ids {
+        let response = router
+            .clone()
+            .oneshot(authorized_request(&format!(
+                "/v1/models/{}",
+                id.replace('/', "%2F")
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{id}");
+    }
+    for id in [
+        "chatgpt-web/gpt-5.6",
+        "chatgpt-web/gpt-6",
+        "chatgpt-web/gpt-5.6-pro-tools",
+        "chatgpt-web/gpt-6-sol",
+        "chatgpt-web/gpt-6-sol-instant",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(authorized_request(&format!(
+                "/v1/models/{}",
+                id.replace('/', "%2F")
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{id}");
+    }
 }

@@ -302,6 +302,7 @@ impl GrokAccountSessionSelector {
                                     .account_selection_policy()
                                     .max_concurrent_per_account(),
                             ),
+                            request.account_selection_policy().request_interval(),
                             request.deadline(),
                         )
                         .with_metadata(request.lease_metadata.clone())

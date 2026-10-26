@@ -220,7 +220,7 @@ where
 
     /// 对固定账号执行诊断请求
     ///
-    /// 仅跳过该账号的本地可用性投影；账号租约和并发仍必须满足
+    /// 仅跳过该账号的本地可用性投影；账号租约、并发和请求间隔仍必须满足
     pub async fn start_diagnostic(
         &self,
         request: NewModelRequest,

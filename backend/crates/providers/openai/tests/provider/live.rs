@@ -70,7 +70,7 @@ fn live_request_with_headers(
     );
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).unwrap(),
-        gateway_core::settings::SettingsValues::new(2, "smart", BTreeMap::new(), None, None),
+        gateway_core::settings::SettingsValues::new(2, 10, "smart", BTreeMap::new(), None, None),
         vec![provider.clone()],
         Vec::new(),
         Vec::new(),
@@ -218,7 +218,7 @@ async fn live_bootstrap_rejects_missing_planned_model_before_upstream_send() {
     let provider_kind = ProviderKind::new("openai").unwrap();
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).unwrap(),
-        gateway_core::settings::SettingsValues::new(2, "smart", BTreeMap::new(), None, None),
+        gateway_core::settings::SettingsValues::new(2, 10, "smart", BTreeMap::new(), None, None),
         vec![provider_kind.clone()],
         Vec::new(),
         Vec::new(),
@@ -773,4 +773,38 @@ async fn descendant_live_creation_waits_and_follows_root_account_migration() {
         "chatgpt-acct_subagent_b"
     );
     upstream.verify().await;
+}
+
+
+#[tokio::test]
+async fn hot_live_client_headers_are_forwarded_only_when_present() {
+    for supplied in [false, true] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, ACCOUNT).await;
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/codex/realtime/calls"))
+            .respond_with(ResponseTemplate::new(201)
+                .insert_header("location", format!("/v1/live/{CALL}"))
+                .set_body_string("v=0\r\n"))
+            .expect(1).mount(&upstream).await;
+        let provider = crate::admin::initialized_test_provider(store, upstream.uri()).await;
+        let fields = [
+            ("voice-session-id", "voice-client-123"),
+            ("x-codex-turn-metadata", "{\"turn\":\"client-123\"}"),
+            ("session-id", "session-client-123"),
+            ("thread-id", "thread-client-123"),
+        ];
+        let headers = if supplied { fields.iter().map(|(name, value)|
+            gateway_core::operation::ProviderHttpHeader::new(*name, Bytes::copy_from_slice(value.as_bytes()))
+        ).collect() } else { Vec::new() };
+        let mut stream = provider.execute(live_request_with_headers(headers),
+            context("req_hot_live_headers", CancellationToken::new())).await.unwrap();
+        while let Some(event) = stream.next().await { event.unwrap(); }
+        let requests = upstream.received_requests().await.unwrap();
+        for (name, value) in fields {
+            if supplied { assert_eq!(requests[0].headers[name], value); }
+            else { assert!(!requests[0].headers.contains_key(name), "synthesized {name}"); }
+        }
+        assert!(!requests[0].headers.contains_key("x-oai-attestation"));
+    }
 }

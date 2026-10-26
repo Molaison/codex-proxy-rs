@@ -226,3 +226,256 @@ fn http_decode_should_apply_configured_limits_to_every_encoding_and_frame() {
         assert!(decode_request_with_headers(REQUEST, &request_headers, 1).is_ok());
     }
 }
+
+#[test]
+fn web_roster_normalizes_all_modes_before_http_and_websocket_routing() {
+    for family in ["5.6", "6"] {
+        for (strength, backend, upstream) in [
+            ("high", "sol", "high"),
+            ("xhigh", "sol", "xhigh"),
+            ("pro", "pro", "max"),
+        ] {
+            for (mode, suffix) in [("chat", ""), ("tools", "-tools")] {
+                for (persistence, temporary) in [("persist", ""), ("temp", "-temporary")] {
+                    let mut body = json!({
+                        "model": format!("chatgpt-web/gpt-{family}"), "input": "hello",
+                        "reasoning": {"effort": format!("{strength}-{mode}-{persistence}"), "summary": "auto"},
+                        "previous_response_id": "resp_previous", "store": true,
+                        "tools": [{"type": "function", "name": "read"}]
+                    });
+                    let mut alias = body.clone();
+                    alias["model"] =
+                        json!(format!("chatgpt-web/gpt-{family}-{mode}-{persistence}"));
+                    alias["reasoning"]["effort"] = json!(upstream);
+                    let alias_http = super::decode_request(alias.to_string().as_bytes()).unwrap();
+                    alias["type"] = json!("response.create");
+                    let alias_websocket =
+                        super::decode_response_create(&alias.to_string()).unwrap();
+                    let http = super::decode_request(body.to_string().as_bytes()).unwrap();
+                    body["type"] = json!("response.create");
+                    let websocket = super::decode_response_create(&body.to_string()).unwrap();
+                    for decoded in [http, websocket, alias_http, alias_websocket] {
+                        let expected_model = format!("chatgpt-web/gpt-{family}-{backend}{suffix}");
+                        assert_eq!(decoded.metadata().requested_model(), expected_model);
+                        let wire = openai_wire_body(&decoded);
+                        assert_eq!(wire["model"], expected_model);
+                        assert_eq!(
+                            wire["reasoning"]["effort"],
+                            format!("{upstream}{temporary}")
+                        );
+                        assert_eq!(wire["reasoning"]["summary"], "auto");
+                        assert_eq!(wire["previous_response_id"], "resp_previous");
+                        assert_eq!(wire["tools"], body["tools"]);
+                        assert!(decoded.metadata().store());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn web_roster_defaults_and_invalid_efforts_are_explicit() {
+    for reasoning in [None, Some(json!({"summary": "auto"}))] {
+        let mut body = json!({"model": "chatgpt-web/gpt-6", "input": "hello"});
+        if let Some(reasoning) = reasoning {
+            body["reasoning"] = reasoning;
+        }
+        let decoded = super::decode_request(body.to_string().as_bytes()).unwrap();
+        assert_eq!(
+            decoded.metadata().requested_model(),
+            "chatgpt-web/gpt-6-sol-tools"
+        );
+        assert_eq!(openai_wire_body(&decoded)["reasoning"]["effort"], "xhigh");
+    }
+    for mode in ["chat", "tools"] {
+        for persistence in ["persist", "temp"] {
+            let model = format!("chatgpt-web/gpt-6-{mode}-{persistence}");
+            let decoded = super::decode_request(
+                json!({"model": model, "input": "hello"})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(
+                decoded.metadata().requested_model(),
+                format!(
+                    "chatgpt-web/gpt-6-sol{}",
+                    if mode == "tools" { "-tools" } else { "" }
+                )
+            );
+            assert_eq!(
+                openai_wire_body(&decoded)["reasoning"]["effort"],
+                if persistence == "temp" {
+                    "xhigh-temporary"
+                } else {
+                    "xhigh"
+                }
+            );
+            for effort in [
+                json!("medium"),
+                json!("pro"),
+                json!("xhigh-tools-persist"),
+                json!(null),
+                json!(42),
+            ] {
+                let mut body = json!({"model": model, "reasoning": {"effort": effort}});
+                assert_eq!(
+                    super::decode_request(body.to_string().as_bytes()).unwrap_err(),
+                    RequestDecodeError::InvalidValue {
+                        field: "reasoning.effort".to_owned()
+                    }
+                );
+                body["type"] = json!("response.create");
+                assert!(super::decode_response_create(&body.to_string()).is_err());
+            }
+            assert!(
+                super::decode_request(
+                    json!({"model": model, "reasoning": null})
+                        .to_string()
+                        .as_bytes()
+                )
+                .is_err()
+            );
+        }
+    }
+    for effort in [
+        json!("high"),
+        json!("low-chat-persist"),
+        json!("max-tools-temp"),
+        json!("pro-tools-temporary"),
+        json!("xhigh-tools-persist-extra"),
+        json!(null),
+        json!(42),
+    ] {
+        let mut body = json!({"model": "chatgpt-web/gpt-6", "reasoning": {"effort": effort}});
+        let error = super::decode_request(body.to_string().as_bytes()).unwrap_err();
+        assert_eq!(
+            error,
+            RequestDecodeError::InvalidValue {
+                field: "reasoning.effort".to_owned()
+            }
+        );
+        body["type"] = json!("response.create");
+        assert!(super::decode_response_create(&body.to_string()).is_err());
+    }
+}
+
+#[test]
+fn web_roster_preserves_old_models_and_their_efforts() {
+    for model in [
+        "chatgpt-web/gpt-6-sol",
+        "chatgpt-web/gpt-5.6-pro-tools",
+        "chatgpt-web/gpt-6-sol-instant",
+        "gpt-6",
+    ] {
+        let body = json!({"model": model, "reasoning": {"effort": "future-effort"}, "input": "history", "previous_response_id": "resp_old"});
+        let decoded = super::decode_request(body.to_string().as_bytes()).unwrap();
+        assert_eq!(openai_wire_body(&decoded), body.as_object().unwrap());
+        assert_eq!(decoded.metadata().requested_model(), model);
+    }
+}
+
+#[test]
+fn web_roster_cannot_expand_the_keys_frozen_account_group_or_model_permissions() {
+    use gateway_core::{
+        account::{AccountModelAccess, AccountModelAccessMode, ProviderAccountId},
+        routing::{
+            AccountGroupId, ClientRoutingScope, FrozenAccountScope, ProviderKind, PublicModelId,
+            RoutingContext, RoutingGroupSnapshot, RuntimeAccount, RuntimeAccountDirectory,
+        },
+    };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
+    let provider = ProviderKind::new("openai").unwrap();
+    let chat_group = AccountGroupId::new("grp_00000000000000000000000000000001").unwrap();
+    let tools_group = AccountGroupId::new("grp_00000000000000000000000000000002").unwrap();
+    let directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([
+        (
+            ProviderAccountId::new("acct_chat").unwrap(),
+            RuntimeAccount::new(provider.clone(), BTreeSet::from([chat_group.clone()]))
+                .with_model_access(
+                    AccountModelAccess::new(
+                        AccountModelAccessMode::Allowlist,
+                        vec!["chatgpt-web/gpt-6-sol".to_owned()],
+                    )
+                    .unwrap(),
+                ),
+        ),
+        (
+            ProviderAccountId::new("acct_tools").unwrap(),
+            RuntimeAccount::new(provider.clone(), BTreeSet::from([tools_group])),
+        ),
+    ])));
+    let scope = Arc::new(FrozenAccountScope::new(
+        Arc::clone(&directory),
+        ClientRoutingScope::restricted(
+            vec![RoutingGroupSnapshot::new(
+                chat_group.clone(),
+                "Chat only".to_owned(),
+            )],
+            BTreeSet::from([chat_group]),
+            BTreeSet::from([provider.clone()]),
+        )
+        .unwrap(),
+    ));
+    let models = [
+        "chatgpt-web/gpt-6-sol",
+        "chatgpt-web/gpt-6-sol-tools",
+        "chatgpt-web/gpt-6-pro",
+        "chatgpt-web/gpt-6-pro-tools",
+    ]
+    .map(|model| {
+        gateway_core::routing::ProviderModel::new(
+            provider.clone(),
+            gateway_core::routing::UpstreamModelId::new(model).unwrap(),
+            gateway_core::routing::ModelCapabilities::new(
+                BTreeSet::from([gateway_core::operation::OperationKind::Generate]),
+                None,
+            )
+            .with_upstream_feature_validation(),
+        )
+    })
+    .to_vec();
+    let snapshot = gateway_core::routing::RuntimeSnapshot::new(
+        gateway_core::routing::ConfigRevision::new(1).unwrap(),
+        gateway_core::settings::SettingsValues::new(2, 1, "smart", Default::default(), None, None),
+        vec![provider],
+        models,
+        vec![],
+    )
+    .unwrap()
+    .with_account_directory(directory);
+    for (effort, allowed) in [
+        ("high-chat-persist", true),
+        ("xhigh-chat-temp", true),
+        ("pro-chat-persist", false),
+        ("high-tools-persist", false),
+        ("pro-tools-temp", false),
+    ] {
+        let parts = effort.split('-').collect::<Vec<_>>();
+        for (model, effort) in [
+            ("chatgpt-web/gpt-6".to_owned(), effort.to_owned()),
+            (
+                format!("chatgpt-web/gpt-6-{}-{}", parts[1], parts[2]),
+                if parts[0] == "pro" { "max" } else { parts[0] }.to_owned(),
+            ),
+        ] {
+            let decoded = super::decode_request(
+                json!({"model": model, "reasoning": {"effort": effort}, "input": "hello"})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+            let result = snapshot.plan(
+                &PublicModelId::new(decoded.metadata().requested_model()).unwrap(),
+                decoded.operation(),
+                Arc::clone(&scope),
+                &RoutingContext::default(),
+            );
+            assert_eq!(result.is_ok(), allowed, "{model}/{effort}: {result:?}");
+        }
+    }
+}

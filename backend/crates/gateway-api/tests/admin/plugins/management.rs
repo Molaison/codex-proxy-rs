@@ -395,7 +395,14 @@ async fn published_fixture() -> AdminTestFixture {
     fixture.published_snapshot.publish(
         RuntimeSnapshot::new(
             ConfigRevision::new(7).unwrap(),
-            gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+            gateway_core::settings::SettingsValues::new(
+                1,
+                0,
+                "smart",
+                Default::default(),
+                None,
+                None,
+            ),
             vec![],
             vec![],
             vec![],

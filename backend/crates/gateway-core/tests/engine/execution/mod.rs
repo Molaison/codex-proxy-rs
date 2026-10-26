@@ -141,15 +141,17 @@ fn request(service: &DefaultExecutionService, transport: ClientTransport) -> Sta
 }
 
 #[test]
-fn default_request_has_no_total_deadline_and_explicit_timeout_can_be_cleared() {
+fn default_request_keeps_queue_budget_and_explicit_timeout_can_be_cleared() {
     block_on(async {
         let service = service(Arc::default(), Arc::default());
         let client = request(&service, ClientTransport::HttpSse).client;
         let mut prepared = service.prepare_execution(client).await.unwrap();
-        assert_eq!(prepared.deadline_at().at(), None);
+        let default = Duration::from_secs(600)
+            + prepared.client().snapshot().client_queue_policy().timeout;
+        assert_eq!(prepared.deadline_at().at(), Some(prepared.started_at() + default));
         let baseline = prepared.request_settings();
         let mut values = baseline.execution_values().unwrap();
-        assert_eq!(values.timeout_ms, None);
+        assert_eq!(values.timeout_ms, Some(default.as_millis() as u64));
         values.timeout_ms = Some(1_800_000);
         let limited = baseline
             .replace_execution(&values, "timeout-plugin")
@@ -168,6 +170,11 @@ fn default_request_has_no_total_deadline_and_explicit_timeout_can_be_cleared() {
             )
             .unwrap();
         assert_eq!(prepared.deadline_at().at(), None);
+        let cleared = service
+            .prepare_execution(prepared.client().clone())
+            .await
+            .unwrap();
+        assert_eq!(cleared.deadline_at().at(), None);
         values.timeout_ms = Some(0);
         prepared
             .apply_settings(
@@ -1167,7 +1174,7 @@ fn request_policy_snapshot(
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
     RuntimeSnapshot::new(
         ConfigRevision::new(1).unwrap(),
-        gateway_core::settings::SettingsValues::new(2, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(2, 1, "smart", Default::default(), None, None),
         providers.to_vec(),
         providers
             .iter()
@@ -1895,7 +1902,14 @@ fn model_routing_cannot_expand_the_frozen_key_model_scope() {
             ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
         let snapshot = RuntimeSnapshot::new(
             ConfigRevision::new(1).unwrap(),
-            gateway_core::settings::SettingsValues::new(2, "smart", Default::default(), None, None),
+            gateway_core::settings::SettingsValues::new(
+                2,
+                1,
+                "smart",
+                Default::default(),
+                None,
+                None,
+            ),
             vec![kind.clone()],
             ["gpt-start", "gpt-blocked"]
                 .into_iter()
@@ -2275,7 +2289,7 @@ fn fallback_observation_snapshot(reference: ExtensionSetReference) -> RuntimeSna
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
     RuntimeSnapshot::new(
         ConfigRevision::new(1).unwrap(),
-        gateway_core::settings::SettingsValues::new(2, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(2, 1, "smart", Default::default(), None, None),
         providers.to_vec(),
         providers
             .iter()
@@ -3618,6 +3632,12 @@ fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
     let rejections = store.entry_rejections.lock().unwrap();
     assert_eq!(rejections.len(), 1);
     assert_eq!(rejections[0].error.kind(), GatewayErrorKind::ModelNotFound);
+    assert_eq!(rejections[0].requested_model.as_ref().unwrap().as_str(), model);
+    assert_eq!(rejections[0].endpoint, "/v1/responses");
+    assert!(matches!(
+        rejections[0].routing_error,
+        Some(gateway_core::error::RoutingError::ModelNotFound { .. })
+    ));
     assert!(store.requests.lock().unwrap().is_empty());
 }
 
@@ -3963,7 +3983,7 @@ fn probe_snapshot() -> RuntimeSnapshot {
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
     RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("config revision"),
-        gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(1, 1, "smart", Default::default(), None, None),
         vec![provider.clone()],
         vec![ProviderModel::new(
             provider,
@@ -3979,7 +3999,7 @@ fn client_snapshot() -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").expect("provider kind");
     RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("config revision"),
-        gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(1, 1, "smart", Default::default(), None, None),
         vec![provider.clone()],
         Vec::new(),
         vec![ClientPolicy::new(
@@ -4018,7 +4038,7 @@ fn start_snapshot_with_image_policy(
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
     RuntimeSnapshot::new(
         ConfigRevision::new(revision).expect("config revision"),
-        gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(1, 1, "smart", Default::default(), None, None),
         vec![provider.clone()],
         vec![ProviderModel::new(
             provider.clone(),
@@ -4331,6 +4351,66 @@ fn cancelled_waiter_releases_its_place_and_new_requests_do_not_overtake_fifo() {
 }
 
 #[test]
+fn rpm_rejection_waits_for_a_slot_when_the_client_queue_is_enabled() {
+    use futures::FutureExt;
+    block_on(async {
+        for max_concurrency in [0, 1] {
+            let (service, admissions) =
+                queue_service(max_concurrency, 3, Duration::from_secs(2));
+            admissions.rpm_exhausted.store(true, Ordering::SeqCst);
+            let mut first = service.start(request(&service, ClientTransport::HttpJson));
+            let mut second = service.start(request(&service, ClientTransport::HttpJson));
+            assert!(first.as_mut().now_or_never().is_none());
+            assert!(second.as_mut().now_or_never().is_none());
+            assert_eq!(admissions.granted.load(Ordering::SeqCst), 0);
+            admissions.rpm_exhausted.store(false, Ordering::SeqCst);
+            let mut later = service.start(request(&service, ClientTransport::HttpJson));
+            assert!(
+                later.as_mut().now_or_never().is_none(),
+                "RPM recovery must preserve FIFO"
+            );
+            let first = first.await.expect("first RPM waiter should be admitted");
+            assert_eq!(admissions.granted.load(Ordering::SeqCst), 1);
+            drop(first);
+            let second = second.await.expect("second RPM waiter should be admitted");
+            assert_eq!(admissions.granted.load(Ordering::SeqCst), 2);
+            drop(second);
+            let later = later.await.expect("new request follows existing RPM waiters");
+            assert_eq!(admissions.granted.load(Ordering::SeqCst), 3);
+            drop(later);
+            assert!(admissions.active.lock().unwrap().is_empty());
+        }
+    });
+}
+
+#[test]
+fn disabled_client_queue_preserves_rpm_and_concurrency_rejections() {
+    block_on(async {
+        let (service, admissions) = queue_service(1, 0, Duration::from_secs(1));
+        let running = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .unwrap();
+        let concurrency = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(concurrency.kind(), GatewayErrorKind::ConcurrencyQueueFull);
+        admissions.rpm_exhausted.store(true, Ordering::SeqCst);
+        let rpm = service
+            .start(request(&service, ClientTransport::HttpJson))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(rpm.kind(), GatewayErrorKind::RateLimited);
+        assert_eq!(admissions.granted.load(Ordering::SeqCst), 1);
+        drop(running);
+        assert!(admissions.active.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
 fn queue_timeout_and_rpm_rejection_leave_no_new_admission() {
     block_on(async {
         let (service, admissions) = queue_service(1, 1, Duration::from_secs(1));
@@ -4350,7 +4430,7 @@ fn queue_timeout_and_rpm_rejection_leave_no_new_admission() {
             .await
             .err()
             .unwrap();
-        assert_eq!(limited.kind(), GatewayErrorKind::RateLimited);
+        assert_eq!(limited.kind(), GatewayErrorKind::ConcurrencyQueueTimeout);
         assert_eq!(admissions.granted.load(Ordering::SeqCst), 1);
         drop(running);
     });
@@ -4439,7 +4519,7 @@ fn request_settings_recompute_routing_and_admission_without_changing_sibling_or_
         let mut settings =
             serde_json::to_value(modified.request_settings().execution_values().unwrap()).unwrap();
         settings["runtime"]["model_mappings"] = json!({"request-alias":"gpt-start"});
-        settings["runtime"]["max_account_rotations"] = json!(0);
+        settings["runtime"]["request_interval_ms"] = json!(0);
         settings["runtime"]["request_profiles"] = json!({"openai":{"identity":"request-local"}});
         settings["fast_mode"] = json!("default");
         settings["client_limits"] = json!({"max_concurrency":0,"requests_per_minute":0});
@@ -4659,7 +4739,7 @@ fn entry_settings_freeze_authentication_and_rebase_only_explicit_overrides() {
         let baseline = service.request_settings().unwrap();
         let mut values = serde_json::to_value(baseline.values()).unwrap();
         values["responses_max_decompressed_body_bytes"] = json!(1024);
-        values["max_account_rotations"] = json!(0);
+        values["request_interval_ms"] = json!(0);
         let first = baseline
             .replace(serde_json::from_value(values).unwrap(), "first")
             .unwrap();
@@ -4676,7 +4756,7 @@ fn entry_settings_freeze_authentication_and_rebase_only_explicit_overrides() {
             .unwrap();
         let source = second.inspect();
         assert_eq!(
-            source["overrides"]["max_account_rotations"]["instance_id"],
+            source["overrides"]["request_interval_ms"]["instance_id"],
             "first"
         );
         assert_eq!(
@@ -4874,7 +4954,14 @@ fn child_settings_recompute_key_scope_without_inheriting_parent_defaults() {
         .collect();
         let snapshot = RuntimeSnapshot::new(
             ConfigRevision::new(1).unwrap(),
-            gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+            gateway_core::settings::SettingsValues::new(
+                1,
+                0,
+                "smart",
+                Default::default(),
+                None,
+                None,
+            ),
             vec![provider],
             vec![],
             policies,
@@ -4917,7 +5004,7 @@ fn child_settings_recompute_key_scope_without_inheriting_parent_defaults() {
                 Some(90_000),
                 "parent-default",
             ),
-            ("sk_child", 9, FastMode::Disabled, None, "child-default"),
+            ("sk_child", 9, FastMode::Disabled, Some((600 + original.client_queue_policy().timeout.as_secs()) * 1000), "child-default"),
         ] {
             let request = ClientAuthenticationRequest::bearer(token)
                 .unwrap()

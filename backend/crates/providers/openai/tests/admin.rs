@@ -1653,7 +1653,7 @@ fn initialized_provider_request(operation: Operation, account_id: &str) -> Provi
     let account_scope = initialized_account_scope(account_id);
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("revision"),
-        gateway_core::settings::SettingsValues::new(2, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(2, 10, "smart", Default::default(), None, None),
         vec![provider.clone()],
         vec![ProviderModel::new(
             provider,
@@ -2599,6 +2599,7 @@ async fn api_key_admin_exposes_only_configuration_and_preserves_key_when_rotatin
             provider_openai::credential::ResponsesTransport::Http,
         )
         .await;
+    store.set_api_key_request_local_retry("acct_api_admin", true);
     let account = store.account("acct_api_admin").unwrap();
     let config = valid_config();
     let bundle = provider_openai::initialize(
@@ -2614,7 +2615,8 @@ async fn api_key_admin_exposes_only_configuration_and_preserves_key_when_rotatin
         .unwrap()
         .unwrap();
     let configuration = configuration.expose_to_provider().expose_to_provider();
-    assert_eq!(configuration.len(), 2);
+    assert_eq!(configuration.len(), 3);
+    assert_eq!(configuration.get("request_local_retry"), Some(&json!(true)));
     assert_eq!(
         configuration.get("base_url"),
         Some(&json!("https://first.example/v1"))
@@ -2645,6 +2647,7 @@ async fn api_key_admin_exposes_only_configuration_and_preserves_key_when_rotatin
             .expose_to_provider();
         assert_eq!(material.get("api_key"), Some(&json!("sk-api-test-only")));
         assert_eq!(material.get("base_url"), Some(&json!(base_url)));
+        assert_eq!(material.get("request_local_retry"), Some(&json!(true)));
         assert!(!prepared.facts().has_refresh_token);
         assert_eq!(prepared.facts().account_id, *account.id());
     }

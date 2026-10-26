@@ -20,7 +20,10 @@ use gateway_core::{
 };
 
 pub(crate) const SSE_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
-pub(crate) const SSE_KEEPALIVE_FRAME: Bytes = Bytes::from_static(b": keep-alive\n\n");
+// Codex 在解析出 SSE 事件后才重置 idle deadline；注释不能保活，也不应伪造正文或进度。
+pub(crate) const SSE_KEEPALIVE_FRAME: Bytes = Bytes::from_static(
+    b"event: response.heartbeat\ndata: {\"type\":\"response.heartbeat\"}\n\n",
+);
 
 /// 只读目录/用量与协议错误共用的单帧响应；没有 Provider attempt 或计量副作用
 pub(crate) async fn buffered_response(

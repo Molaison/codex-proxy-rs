@@ -100,6 +100,7 @@ use crate::transport::{
     CodexResponseMetadata, CodexResponseMetadataUpdates, CodexTransportMetrics,
     CodexUpstreamDiagnostics, CodexWebSocketPool, endpoint_url,
     normalize_selected_codex_downstream_body,
+    strip_unverifiable_encrypted_replay,
 };
 
 mod execution;
@@ -458,7 +459,14 @@ impl Provider for CodexProvider {
                 ..Default::default()
             };
         };
-        let Ok(encoded) = encode_generate_request(request, "observability", None) else {
+        // 会话亲和按模型族分域；观测路径也必须使用请求模型，不能用占位名抹掉模型族。
+        let model = request
+            .protocol_payload()
+            .body()
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("observability");
+        let Ok(encoded) = encode_generate_request(request, model, None) else {
             return ProviderRequestObservation::default();
         };
         let semantics = encoded.semantics();
@@ -772,6 +780,10 @@ impl CodexProvider {
         let mut upstream_request = processed.upstream;
         let session_transport_key =
             derive_codex_transport_key(&upstream_request, context.client_api_key_ref());
+        if lease.authentication().forward_client_identity() {
+            upstream_request.forwarded_client_id =
+                Some(context.client_api_key_ref().as_str().to_owned());
+        }
         let previous_session = processed.previous_session;
         let continuation_requested = processed.continuation_requested;
         let session_affinity = processed.session_affinity;
@@ -894,6 +906,13 @@ impl CodexProvider {
                 upstream_request.body_mut(),
                 generate.protocol_payload().context(),
             );
+        }
+        // 明确拒绝后的同请求重放也适用于 API-key 上游；协议规范化仍仅限 OAuth。
+        if session_transport_key.as_ref().is_some_and(|key| {
+            self.session_transport_recovery
+                .sanitize_encrypted_replay(key, context.request_id().as_str())
+        }) {
+            strip_unverifiable_encrypted_replay(upstream_request.body_mut());
         }
         if let Some(location) = lease
             .account()

@@ -75,9 +75,14 @@ pub struct AuthenticatedClient {
 
 impl AuthenticatedClient {
     pub(super) fn execution_timeout(&self) -> Option<Duration> {
-        self.settings
-            .as_ref()
-            .and_then(|settings| settings.execution_timeout(self.policy.key_id()))
+        let default = Duration::from_secs(600) + self.snapshot.client_queue_policy().timeout;
+        self.settings.as_ref().map_or(Some(default), |settings| {
+            settings
+                .clone()
+                .with_execution(&self.policy, Some(duration_ms(default)))
+                .execution_values()
+                .and_then(|values| values.timeout_ms.map(Duration::from_millis))
+        })
     }
 
     #[must_use]

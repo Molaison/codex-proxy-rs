@@ -161,6 +161,7 @@ fn context_with_fast_mode(
         AccountSelectionPolicy::new(
             gateway_core::account::RotationStrategy::RoundRobin,
             std::num::NonZeroU32::new(1).unwrap(),
+            Duration::ZERO,
         ),
         AccountAttemptContext::new(Default::default(), None, None),
         None,

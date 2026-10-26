@@ -475,6 +475,12 @@ impl DefaultExecutionService {
             ))
         });
         let budget_key_id = request.client.policy.key_id().clone();
+        let config_revision = request.client.snapshot.revision();
+        let routing = authorization.account_scope.routing_snapshot();
+        let requested_model = request.target.public_model().cloned();
+        let operation = request.operation.kind();
+        let endpoint = request.metadata.endpoint.clone();
+        let mut routing_error = None;
         let mut entered_execution = false;
         let result = async {
             if request_policy.is_some() {
@@ -564,7 +570,10 @@ impl DefaultExecutionService {
                     )
                 }
             }
-            .map_err(map_routing_error)?;
+            .map_err(|error| {
+                routing_error = Some(error.clone());
+                map_routing_error(error)
+            })?;
             let continuation = match request.metadata.previous_response_id.as_ref() {
                 Some(previous) => {
                     let resolve = self
@@ -668,6 +677,12 @@ impl DefaultExecutionService {
             let rejection = crate::engine::EntryRejection {
                 request_id: request_id.clone(),
                 client_key_id: budget_key_id.clone(),
+                config_revision,
+                routing,
+                requested_model,
+                operation,
+                endpoint,
+                routing_error,
                 error: error.clone(),
                 latency: started_at.elapsed().unwrap_or_default(),
             };
@@ -1273,7 +1288,8 @@ impl DefaultExecutionService {
                     model_request_id: request_id.clone(),
                     client_api_key_id: key.clone(),
                     lease_ttl: remaining,
-                    allow_concurrency_acquire: limits.max_concurrency == 0 || waiting.can_try(key),
+                    // 无并发上限时仍可能因 RPM 排队，不能绕过队首资格。
+                    allow_concurrency_acquire: waiting.can_try(key),
                     limits,
                 })
                 .fuse();
@@ -1305,10 +1321,19 @@ impl DefaultExecutionService {
                 }
                 ClientAdmissionDecision::Rejected(reason) => {
                     admission.armed = false;
-                    if reason == ClientAdmissionRejection::RateLimited || policy.max_waiting == 0 {
+                    // RPM 与并发饱和共用 FIFO；只有显式关闭队列才立即拒绝。
+                    if policy.max_waiting == 0 {
                         return Err(GatewayError::new(
-                            GatewayErrorKind::RateLimited,
-                            "request exceeds client API key limits",
+                            if reason == ClientAdmissionRejection::RateLimited {
+                                GatewayErrorKind::RateLimited
+                            } else {
+                                GatewayErrorKind::ConcurrencyQueueFull
+                            },
+                            if reason == ClientAdmissionRejection::RateLimited {
+                                "request exceeds client API key limits"
+                            } else {
+                                "concurrency wait queue is disabled"
+                            },
                         ));
                     }
                     if waiting.elapsed().is_zero()

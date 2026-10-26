@@ -21,6 +21,7 @@ use crate::{
 use super::{
     auth::{authenticate_client, client_access_error_response},
     error::{model_not_found_response, openai_error_response},
+    web_models::{PUBLIC_MODELS, source_models, synthesize_models},
 };
 
 const MODEL_CREATED_TIMESTAMP: i64 = 1_700_000_000;
@@ -102,9 +103,23 @@ async fn models_response(
                 }
             })
             .collect::<Result<Vec<_>, ()>>();
-        let Ok(models) = models else {
+        let Ok(mut models) = models else {
             return catalog_unavailable_response();
         };
+        let native_models = catalog
+            .iter()
+            .zip(&models)
+            .filter_map(|(entry, value)| {
+                matches!(entry, PublicModelDescriptor::Native { .. }).then_some(value)
+            })
+            .collect::<Vec<_>>();
+        let logical_models = synthesize_models(&native_models);
+        models.retain(|model| {
+            !model["slug"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("chatgpt-web/"))
+        });
+        models.extend(logical_models);
         return (
             StatusCode::OK,
             // 目录经过账号选择/别名/多 Provider 聚合，不能借用上游 ETag 表示改写后的正文
@@ -116,10 +131,19 @@ async fn models_response(
             .into_response();
     }
 
-    let data = service
-        .public_models(&client)
-        .into_iter()
-        .map(|model| openai_model_json(&model))
+    let public_models = service.public_models(&client);
+    let aliases = PUBLIC_MODELS.into_iter().filter(|model| {
+        source_models(model)
+            .expect("static Web mode")
+            .iter()
+            .any(|source| public_models.contains(source))
+    });
+    let data = public_models
+        .iter()
+        .map(String::as_str)
+        .filter(|model| !model.starts_with("chatgpt-web/"))
+        .chain(aliases)
+        .map(openai_model_json)
         .collect::<Vec<_>>();
     (
         StatusCode::OK,
@@ -174,7 +198,19 @@ fn model_detail_response(
     let Ok(public_model) = PublicModelId::new(model_id) else {
         return model_not_found_response().into_response();
     };
-    if !service.contains_public_model(client, &public_model) {
+    let exists = if public_model.as_str().starts_with("chatgpt-web/") {
+        source_models(public_model.as_str()).is_some_and(|sources| {
+            sources.iter().any(|source| {
+                service.contains_public_model(
+                    client,
+                    &PublicModelId::new(source.clone()).expect("static Web model"),
+                )
+            })
+        })
+    } else {
+        service.contains_public_model(client, &public_model)
+    };
+    if !exists {
         return model_not_found_response().into_response();
     }
 

@@ -15,7 +15,14 @@ async fn middleware_preserves_three_state_fast_and_sources() {
     ] {
         let snapshot = gateway_core::routing::RuntimeSnapshot::new(
             ConfigRevision::new(1).unwrap(),
-            gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+            gateway_core::settings::SettingsValues::new(
+                1,
+                0,
+                "smart",
+                Default::default(),
+                None,
+                None,
+            ),
             vec![],
             vec![],
             vec![],

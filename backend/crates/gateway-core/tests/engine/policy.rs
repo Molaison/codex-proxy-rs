@@ -1,6 +1,11 @@
 //! 验证插件调度策略对软亲和的覆盖与宿主候选范围限制
 
-use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc, time::SystemTime};
+use std::{
+    collections::BTreeSet,
+    num::NonZeroU32,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use futures::{executor::block_on, future::BoxFuture};
 use gateway_core::{
@@ -105,7 +110,7 @@ fn policy_decision(decision: AccountScheduleDecision) -> RequestPolicyContext {
 
 fn context() -> AccountSelectionContext {
     AccountSelectionContext {
-        policy: AccountSelectionPolicy::new(RotationStrategy::Sticky, NonZeroU32::new(2).unwrap()),
+        policy: AccountSelectionPolicy::new(RotationStrategy::Sticky, NonZeroU32::new(2).unwrap(), Duration::ZERO),
         now: SystemTime::now(),
         excluded_accounts: BTreeSet::new(),
         busy_accounts: Default::default(),
@@ -178,7 +183,7 @@ fn explicit_plugin_choices_override_native_soft_affinity() {
             .with_scheduling(None, AccountWeight::new(10).unwrap());
         let mut selection_context = context();
         selection_context.policy =
-            AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(2).unwrap())
+            AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(2).unwrap(), Duration::ZERO)
                 .with_smart_scheduling(
                     gateway_core::account::SmartSchedulingConfig::new([
                         1.0, 0.8, 1.0, 0.5, 0.0, 0.0,
@@ -247,7 +252,7 @@ fn filtered_delegation_preserves_native_weights_and_affinity_on_remaining_accoun
         ])));
         for strategy in [RotationStrategy::Smart, RotationStrategy::RoundRobin] {
             let mut context = context();
-            context.policy = AccountSelectionPolicy::new(strategy, NonZeroU32::new(2).unwrap());
+            context.policy = AccountSelectionPolicy::new(strategy, NonZeroU32::new(2).unwrap(), Duration::ZERO);
             let selected = policy
                 .select_account(
                     NonZeroU32::MIN,

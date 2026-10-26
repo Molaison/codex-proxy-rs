@@ -2766,6 +2766,7 @@ async fn dashboard_shares_account_facts_and_bounds_slow_cooldown_reads() {
         resource_id: "acct_shared_1".to_owned(),
         owner_id: "dashboard-test".to_owned(),
         max_concurrent: 3,
+        request_interval: Duration::ZERO,
         ttl: Duration::from_secs(60),
     };
     let CredentialBoundedLeaseAcquisition::Acquired(lease) =

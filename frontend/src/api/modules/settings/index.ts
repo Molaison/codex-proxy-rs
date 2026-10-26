@@ -56,6 +56,7 @@ export interface RuntimeSettings {
   openaiAccountAffinity: AccountAffinity
   maxAccountRotations: number
   openaiSessionAffinityTtlHours: number
+  requestIntervalMs: number
   maxWaitingPerKey: number
   maxWaitingPerAccount: number
   concurrencyWaitTimeoutSeconds: number

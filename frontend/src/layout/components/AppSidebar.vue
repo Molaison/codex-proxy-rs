@@ -70,6 +70,7 @@ const pluginGroupExpanded = shallowRef(route.path.startsWith('/plugins'))
 
 const navItems = [
   { label: '概览', icon: LayoutDashboard, path: '/' },
+  { label: '模型与权限', icon: Blocks, path: '/models' },
   { label: '账号管理', icon: Users, path: '/accounts' },
   { label: '代理管理', icon: Network, path: '/proxies' },
   { label: '分组管理', icon: FolderTree, path: '/groups' },

@@ -614,6 +614,9 @@ pub(crate) fn parse_api_model_catalog(
     struct ApiModel {
         id: String,
         display_name: Option<String>,
+        name: Option<String>,
+        context_length: Option<i64>,
+        supported_endpoints: Option<Vec<String>>,
     }
     if body.len() > MAX_CODEX_MODEL_CATALOG_BYTES {
         return Err(CodexModelCatalogError::ResponseTooLarge);
@@ -642,8 +645,22 @@ pub(crate) fn parse_api_model_catalog(
             UpstreamModelId::new(item.id).map_err(|_| CodexModelCatalogError::InvalidModelSlug)?;
         let display_name = item
             .display_name
+            .or(item.name)
             .unwrap_or_else(|| request_model.as_str().to_owned());
         validate_public_text(&display_name, MAX_DISPLAY_NAME_BYTES, false)?;
+        let context_window_tokens = optional_positive(item.context_length)?;
+        // 仅消费上游明确声明；未提供端点列表的传统 ID 目录仍保持未知。
+        let responses_api = match item.supported_endpoints {
+            Some(endpoints) => {
+                for endpoint in &endpoints {
+                    validate_public_text(endpoint, MAX_DISPLAY_NAME_BYTES, false)?;
+                }
+                CodexCatalogCapabilityEvidence::from_wire(Some(
+                    endpoints.iter().any(|endpoint| endpoint == "/responses"),
+                ))
+            }
+            None => CodexCatalogCapabilityEvidence::Unknown,
+        };
         let document = RawJsonPayload::new(
             "openai",
             Bytes::from(
@@ -659,8 +676,14 @@ pub(crate) fn parse_api_model_catalog(
             document,
             request_model,
             display_name,
-            capabilities: CodexCatalogCapabilities::default(),
-            limits: CodexCatalogLimits::default(),
+            capabilities: CodexCatalogCapabilities {
+                responses_api,
+                ..CodexCatalogCapabilities::default()
+            },
+            limits: CodexCatalogLimits {
+                context_window_tokens,
+                ..CodexCatalogLimits::default()
+            },
             metadata: CodexCatalogMetadata::default(),
         });
     }

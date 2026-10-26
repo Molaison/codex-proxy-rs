@@ -6,6 +6,7 @@ mod keepalive;
 mod request;
 mod response;
 mod validation;
+mod waiting;
 pub mod websocket;
 
 pub(crate) use crate::request_context::request_client_context;

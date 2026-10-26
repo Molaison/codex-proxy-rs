@@ -720,7 +720,7 @@ fn attempt_middleware_cannot_add_image_generation_to_a_denied_scope() {
             request,
             NonZeroU32::new(1).unwrap(),
             SystemTime::now() + Duration::from_secs(5),
-            AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(1).unwrap()),
+            AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(1).unwrap(), std::time::Duration::ZERO),
             AccountAttemptContext::new(Default::default(), None, None)
                 .with_account_scope(Arc::new(scope)),
             None,

@@ -74,6 +74,19 @@ impl CodexRuntimeAuthentication {
             Self::ApiKey(_) => None,
         }
     }
+
+    #[must_use]
+    pub const fn forward_client_identity(&self) -> bool {
+        matches!(self, Self::ApiKey(authentication) if authentication.configuration.forward_client_identity)
+    }
+
+    #[must_use]
+    pub const fn request_local_retry(&self) -> bool {
+        match self {
+            Self::OAuth(_) => true,
+            Self::ApiKey(authentication) => authentication.configuration.request_local_retry,
+        }
+    }
 }
 
 impl std::fmt::Debug for CodexRuntimeAuthentication {

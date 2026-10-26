@@ -69,6 +69,7 @@ const {
   openaiGuardianReservedConcurrencyValue,
   maxAccountRotationsValue,
   openaiSessionAffinityTtlHoursValue,
+  requestIntervalMsValue,
   maxWaitingPerKeyValue,
   maxWaitingPerAccountValue,
   concurrencyWaitTimeoutSecondsValue,
@@ -176,6 +177,7 @@ watch(section, (value) => {
           />
           <ConcurrencyPolicyCard
             v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"
+            v-model:request-interval-ms="requestIntervalMsValue"
             v-model:max-waiting-per-key="maxWaitingPerKeyValue"
             v-model:max-waiting-per-account="maxWaitingPerAccountValue"
             v-model:concurrency-wait-timeout-seconds="concurrencyWaitTimeoutSecondsValue"

@@ -411,15 +411,11 @@ impl ModelRequestRepository for PgExecutionStore {
         request.validate()?;
         let observation = RequestObservation::initial(&request)?;
         sqlx::query(
-            "with inserted as (
-               insert into model_requests (
+            "insert into model_requests (
                  id, client_api_key_ref, operation, client_transport,
-                 requested_model_id, image_generation_requested, started_at,
+                 requested_model_id, image_generation_requested, started_at, deadline_at,
                  continuation_affinity_hash, continuation_requested, request_kind, request_observation_json
-               ) values ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12)
-               returning id
-             ) insert into model_request_leases (request_id, lease_expires_at)
-               select id, $8 from inserted",
+               ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(request.id)
         .bind(request.client_api_key_ref)
@@ -451,24 +447,20 @@ impl ModelRequestRepository for PgExecutionStore {
         }
         let observation = RequestObservation::initial(&request)?;
         sqlx::query(
-            "with inserted as (
-               insert into model_requests (
+            "insert into model_requests (
                  id, client_api_key_ref, operation, client_transport,
-                 requested_model_id, image_generation_requested, started_at,
+                 requested_model_id, image_generation_requested, started_at, deadline_at,
                  continuation_affinity_hash, continuation_requested, request_kind, request_observation_json,
                  provider_kind, provider_account_ref, upstream_model_id,
                  upstream_transport, attempt_count, upstream_send_state
-               ) select $1, $2, $3, $4, $5, $6, $7, $9, $10, $11,
+               ) select $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                  $12::jsonb || jsonb_build_object(
                    'account', coalesce($14::jsonb, '{}'::jsonb),
                    'transport', jsonb_strip_nulls(jsonb_build_object('httpVersion', $18::text)),
                    'scheduling', ($12::jsonb -> 'scheduling') || jsonb_strip_nulls(jsonb_build_object(
                      'accountSelectionWaitMs', $19::bigint,
                      'capacityUsedSlots', $20::bigint, 'capacityTotalSlots', $21::bigint))),
-                 $13, $15, $16, $17, 1, 'not_sent'
-               returning id
-             ) insert into model_request_leases (request_id, lease_expires_at)
-               select id, $8 from inserted",
+                 $13, $15, $16, $17, 1, 'not_sent'",
         )
         .bind(request.id)
         .bind(request.client_api_key_ref)
@@ -853,9 +845,9 @@ impl ExecutionStore for PgExecutionStore {
                     // 首次观测可能尚在队列中；缺行不创建记录，已终结行不改写
                     sqlx::query_scalar::<_, bool>(
                         "with renewed as (
-                           update model_request_leases set lease_expires_at = now() + $2 * interval '1 millisecond'
-                           where request_id = $1 and lease_expires_at > now()
-                           returning request_id
+                           update model_requests set deadline_at = now() + $2 * interval '1 millisecond'
+                           where id = $1 and outcome = 'running' and deadline_at > now()
+                           returning id
                          )
                          select exists(select 1 from renewed)
                            or not exists(select 1 from model_requests where id = $1 and outcome = 'running')",
@@ -1011,6 +1003,28 @@ impl ExecutionStore for PgExecutionStore {
         rejection: gateway_core::engine::EntryRejection,
     ) -> Result<(), CoreStoreError> {
         let error = rejection.error;
+        let (routing_scope, routing_group_refs, routing_group_names) =
+            routing_snapshot_row(&rejection.routing);
+        let routing_error = rejection.routing_error.as_ref().map(|error| {
+            use gateway_core::error::RoutingError;
+            let code = match error {
+                RoutingError::EmptyAccountScope => "empty_account_scope",
+                RoutingError::ModelNotFound { .. } => "model_not_found",
+                RoutingError::NoCapableProvider { .. } => "no_capable_provider",
+                RoutingError::NoCapableProviderEndpoint { reason, .. } => reason,
+                RoutingError::UnsupportedProviderEndpoint { .. } => "unsupported_provider_endpoint",
+                _ => "invalid_routing_configuration",
+            };
+            let exclusions = match error {
+                RoutingError::NoCapableProvider { exclusions, .. } => serde_json::json!(exclusions),
+                _ => serde_json::json!({}),
+            };
+            serde_json::json!({
+                "code": code,
+                "message": error.to_string(),
+                "providerExclusions": exclusions,
+            })
+        });
         super::OpsEventRepository::append_ops_event(
             &super::PgOpsEventRepository::new(self.pool.clone()),
             super::OpsEvent {
@@ -1040,6 +1054,14 @@ impl ExecutionStore for PgExecutionStore {
                 message: serde_json::json!({
                     "requestId": rejection.request_id.as_str(),
                     "clientKeyId": rejection.client_key_id.as_str(),
+                    "configRevision": rejection.config_revision.get(),
+                    "requestedModel": rejection.requested_model.as_ref().map(|model| model.as_str()),
+                    "operation": rejection.operation.as_str(),
+                    "endpoint": rejection.endpoint,
+                    "routingScope": routing_scope,
+                    "routingGroupRefs": routing_group_refs,
+                    "routingGroupNames": routing_group_names,
+                    "routingError": routing_error,
                     "message": error.client_message(),
                 })
                 .to_string(),

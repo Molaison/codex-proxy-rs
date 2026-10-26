@@ -363,3 +363,32 @@ async fn live_should_strip_downstream_identity_headers() {
         "downstream identity headers reach upstream operation: {leaked:?}"
     );
 }
+
+
+#[tokio::test]
+async fn hot_live_client_headers_are_forwarded_only_when_present() {
+    for supplied in [false, true] {
+        let capture = LiveCapture::new();
+        let mut input = Request::post("/v1/realtime/calls")
+            .header(AUTHORIZATION, format!("Bearer {LIVE_KEY}"))
+            .header("content-type", "application/json");
+        let fields = [
+            ("voice-session-id", "voice-client-123"),
+            ("x-codex-turn-metadata", "{\"turn\":\"client-123\"}"),
+            ("session-id", "session-client-123"),
+            ("thread-id", "thread-client-123"),
+        ];
+        if supplied {
+            for (name, value) in fields { input = input.header(name, value); }
+        }
+        api_router(Arc::clone(&capture) as Arc<dyn ExecutionService>).await
+            .oneshot(input.body(Body::from(json!({"sdp":"v=0"}).to_string())).unwrap())
+            .await.unwrap();
+        let (Operation::ProviderHttp(request), _) = capture.operation().unwrap() else { panic!("operation") };
+        for (name, value) in fields {
+            let actual: Vec<_> = request.headers().iter().filter(|h| h.name() == name).map(|h| h.value()).collect();
+            if supplied { assert_eq!(actual, vec![value.as_bytes()]); }
+            else { assert!(actual.is_empty(), "synthesized {name}"); }
+        }
+    }
+}

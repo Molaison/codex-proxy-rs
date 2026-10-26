@@ -101,6 +101,7 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                     "refresh_margin_seconds".to_owned(),
                     "refresh_concurrency".to_owned(),
                     "max_concurrent_per_account".to_owned(),
+                    "request_interval_ms".to_owned(),
                     "max_waiting_per_key".to_owned(),
                     "max_waiting_per_account".to_owned(),
                     "concurrency_wait_timeout_seconds".to_owned(),

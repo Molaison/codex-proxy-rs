@@ -249,15 +249,23 @@ async fn immediate_delivery_preserves_wire_through_output_terminal_and_eof() {
         }
         let mut wire = Vec::new();
         wire.extend_from_slice(first.wire_event().unwrap().raw_sse_frame().unwrap());
+        let mut truncated = false;
         while let Some(event) = stream.next().await {
-            if let Some(frame) = event
-                .unwrap()
-                .wire_event()
-                .and_then(|wire| wire.raw_sse_frame())
-            {
-                wire.extend_from_slice(frame);
+            match event {
+                Ok(event) => {
+                    if let Some(frame) = event.wire_event().and_then(|wire| wire.raw_sse_frame()) {
+                        wire.extend_from_slice(frame);
+                    }
+                }
+                Err(error) => {
+                    assert_ne!(reason, "terminal");
+                    assert_eq!(error.client_visible_upstream_error().and_then(|error| error.code()), Some("upstream_stream_truncated"));
+                    assert!(!error.replay_is_safe());
+                    truncated = true;
+                }
             }
         }
+        assert_eq!(truncated, reason != "terminal");
         assert_eq!(wire, body.as_bytes());
         server.await.unwrap();
     }

@@ -259,6 +259,8 @@ struct CodexCprApiKeyExportAccount {
     base_url: String,
     api_key: String,
     transport: ResponsesTransport,
+    request_local_retry: bool,
+    forward_client_identity: bool,
 }
 
 #[derive(Serialize)]
@@ -456,6 +458,8 @@ impl CodexCredentialAdmin {
             base_url: String,
             transport: ResponsesTransport,
             api_key: Option<String>,
+            request_local_retry: Option<bool>,
+            forward_client_identity: Option<bool>,
         }
         let rotation: Rotation = serde_json::from_value(material)
             .map_err(|_| CodexCredentialAdminError::InvalidInput)?;
@@ -469,6 +473,12 @@ impl CodexCredentialAdmin {
         data.transport = rotation.transport;
         if let Some(api_key) = rotation.api_key {
             data.api_key = api_key;
+        }
+        if let Some(forward_client_identity) = rotation.forward_client_identity {
+            data.forward_client_identity = forward_client_identity;
+        }
+        if let Some(request_local_retry) = rotation.request_local_retry {
+            data.request_local_retry = request_local_retry;
         }
         let credential = CodexCredentialCodec::encode_complete(CodexCredentialData::ApiKey(data))
             .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
@@ -699,6 +709,8 @@ impl CodexCredentialAdmin {
                         base_url: data.base_url,
                         api_key: data.api_key,
                         transport: data.transport,
+                        request_local_retry: data.request_local_retry,
+                        forward_client_identity: data.forward_client_identity,
                     })
                 }
 
@@ -1548,6 +1560,25 @@ fn parse_api_key_import(value: &Value) -> Result<ApiKeyCredentialData, CodexCred
             .transpose()
             .map_err(|_| CodexCredentialAdminError::InvalidInput)?
             .unwrap_or_default(),
+        forward_client_identity: credentials
+            .get("forward_client_identity")
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or(CodexCredentialAdminError::InvalidInput)
+            })
+            .transpose()?
+            .unwrap_or(false),
+        request_local_retry: credentials
+            .get("request_local_retry")
+            .or_else(|| credentials.get("requestLocalRetry"))
+            .map(|value| {
+                value
+                    .as_bool()
+                    .ok_or(CodexCredentialAdminError::InvalidInput)
+            })
+            .transpose()?
+            .unwrap_or(false),
     };
     if !data.validate() {
         return Err(CodexCredentialAdminError::InvalidCredential);

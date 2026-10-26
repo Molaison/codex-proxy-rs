@@ -125,7 +125,7 @@ impl MiddlewarePlan for Plan {
         assert!(input.is_null());
         Box::pin(async move {
             let mut result = next.run(input).await?;
-            result["refresh_margin_seconds"] = serde_json::json!(4321);
+            result["request_interval_ms"] = serde_json::json!(4321);
             Ok(result)
         })
     }
@@ -452,7 +452,7 @@ async fn admin_http_does_not_invoke_service_middleware_for_native_business_metho
         .await
         .unwrap();
     let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_ne!(result["data"]["refreshMarginSeconds"], 4321);
+    assert_ne!(result["data"]["requestIntervalMs"], 4321);
     assert_eq!(plan.calls.load(Ordering::SeqCst), 0);
 }
 

@@ -2096,7 +2096,7 @@ async fn zero_attempt_failure_does_not_enter_successful_usage_or_cost_aggregates
             .iter()
             .all(|point| { point.standard_amount.is_none() && point.no_cache_amount.is_none() })
     );
-    let charges: i64 = sqlx::query_scalar("select count(*) from client_api_key_charge_events")
+    let charges: i64 = sqlx::query_scalar("select count(*) from client_key_charge_events")
         .fetch_one(&database.pool)
         .await
         .expect("observations do not settle budgets");
@@ -2114,6 +2114,17 @@ async fn entry_rejection_is_visible_without_a_fictitious_model_execution() {
         .record_entry_rejection(gateway_core::engine::EntryRejection {
             request_id: ModelRequestId::new("req_entry_rejection").unwrap(),
             client_key_id: ClientApiKeyId::new("key_entry").unwrap(),
+            config_revision: ConfigRevision::new(7).unwrap(),
+            routing: AccountRoutingSnapshot::all(),
+            requested_model: Some(PublicModelId::new("gpt-denied").unwrap()),
+            operation: OperationKind::Generate,
+            endpoint: "/v1/responses".to_owned(),
+            routing_error: Some(gateway_core::error::RoutingError::NoCapableProvider {
+                model: "gpt-denied".to_owned(),
+                exclusions: std::collections::BTreeMap::from([
+                    ("openai".to_owned(), "account_model_policy"),
+                ]),
+            }),
             error: GatewayError::new(GatewayErrorKind::NoAvailableProvider, "no route"),
             latency: StdDuration::from_millis(12),
         })
@@ -2128,6 +2139,11 @@ async fn entry_rejection_is_visible_without_a_fictitious_model_execution() {
         serde_json::from_str::<Value>(&row.2).unwrap()["requestId"],
         "req_entry_rejection"
     );
+    let message: Value = serde_json::from_str(&row.2).unwrap();
+    assert_eq!(message["configRevision"], 7);
+    assert_eq!(message["requestedModel"], "gpt-denied");
+    assert_eq!(message["routingScope"], "all");
+    assert_eq!(message["routingError"]["providerExclusions"]["openai"], "account_model_policy");
     assert_eq!(row.3, 12);
     let count: i64 = sqlx::query_scalar("select count(*) from model_requests")
         .fetch_one(&database.pool)

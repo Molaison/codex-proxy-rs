@@ -118,6 +118,7 @@ fn round_robin_attempt() -> AttemptContext {
         AccountSelectionPolicy::new(
             RotationStrategy::RoundRobin,
             NonZeroU32::new(2).expect("concurrency"),
+            Duration::ZERO,
         ),
         AccountAttemptContext::new(BTreeSet::new(), None, None)
             .with_account_scope(contract_account_scope()),
@@ -445,6 +446,7 @@ fn selector_uses_frozen_global_account_policy_for_lease() {
         lease.account().revision()
     );
     assert_eq!(requests[0].max_concurrent().get(), 2);
+    assert_eq!(requests[0].request_interval(), Duration::from_millis(10));
     assert_eq!(requests[0].deadline(), attempt.deadline());
 }
 
@@ -531,9 +533,10 @@ fn selector_reloads_quota_snapshot_before_acquiring_the_only_lease() {
     assert_eq!(
         requests.len(),
         1,
-        "conflicted snapshots must never consume capacity"
+        "conflicted snapshots must never consume capacity or request interval"
     );
     assert_eq!(requests[0].max_concurrent().get(), 1);
+    assert_eq!(requests[0].request_interval(), Duration::from_millis(10));
 }
 
 #[test]
@@ -1911,7 +1914,7 @@ fn queued_attempt(timeout: Duration) -> AttemptContext {
         ),
         NonZeroU32::new(1).unwrap(),
         SystemTime::now() + Duration::from_secs(5),
-        AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(2).unwrap())
+        AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(2).unwrap(), Duration::ZERO)
             .with_queue(gateway_core::concurrency::ConcurrencyQueuePolicy {
                 max_waiting: 1,
                 timeout,

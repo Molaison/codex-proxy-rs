@@ -804,7 +804,7 @@ fn scoped_facts(value: u64, allow_removed: bool) -> SnapshotFacts {
     SnapshotFacts::new(
         revision(value),
         revision(value),
-        SettingsValues::new(3, "smart", BTreeMap::new(), None, None),
+        SettingsValues::new(3, 0, "smart", BTreeMap::new(), None, None),
         vec![SnapshotClientPolicyFacts::new(
             ClientApiKeyId::new("key_audit_synthetic").expect("key ID"),
             PlaintextClientApiKey::new("sk_audit_synthetic_not_a_real_key").expect("synthetic key"),
@@ -839,6 +839,7 @@ fn facts(config_revision: u64, observed_current_revision: u64) -> SnapshotFacts 
         revision(observed_current_revision),
         SettingsValues::new(
             3,
+            50,
             "smart",
             BTreeMap::from([("public-model".to_owned(), "upstream-model".to_owned())]),
             None,
@@ -863,7 +864,7 @@ fn compiler(store: Arc<dyn SnapshotStorePort>) -> RuntimeSnapshotCompiler {
 fn empty_snapshot(value: u64) -> RuntimeSnapshot {
     RuntimeSnapshot::new(
         revision(value),
-        gateway_core::settings::SettingsValues::new(1, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(1, 0, "smart", Default::default(), None, None),
         Vec::new(),
         Vec::new(),
         Vec::new(),

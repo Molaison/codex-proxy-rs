@@ -1,5 +1,7 @@
 //! API 层测试入口，以及静态页面资源解析与服务测试
 
+#![recursion_limit = "256"]
+
 mod admin;
 mod architecture;
 mod auth;

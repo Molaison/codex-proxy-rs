@@ -65,7 +65,7 @@ impl Environment {
         .await
         .unwrap();
         sqlx::query(sqlx::AssertSqlSafe(format!(
-            "insert into {}.client_api_key_budget_windows
+            "insert into {}.client_key_budget_windows
              (client_api_key_id, daily_start, daily_end, daily_used_usd, weekly_start, weekly_end, weekly_used_usd)
              values ($1, now(), now()+interval '1 day', 3, now(), now()+interval '7 days', 4)",
             self.schema
@@ -731,6 +731,9 @@ impl Environment {
         } else {
             gateway_store::initialize(config).await.unwrap()
         };
+        // 迁移可能已创建默认行；该场景只测租约释放，明确关闭相邻请求的间隔限制
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("insert into {schema}.runtime_settings(id, config_revision, request_interval_ms, updated_at) values (1,1,0,now()) on conflict (id) do update set request_interval_ms=0")))
+            .execute(&admin).await.unwrap();
         Some(Self {
             store,
             directory,

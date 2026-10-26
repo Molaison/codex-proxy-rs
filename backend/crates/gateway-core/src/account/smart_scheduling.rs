@@ -92,6 +92,9 @@ struct SmartSchedulingValues {
     latency_weight: f64,
     reset_weight: f64,
     queue_weight: f64,
+    // Shared 3.19 storage retains this field; 3.28 scheduling does not use it.
+    #[serde(rename = "preferHigherWeight", default, skip_serializing)]
+    _legacy_prefer_higher_weight: bool,
 }
 
 impl TryFrom<SmartSchedulingValues> for SmartSchedulingConfig {
@@ -126,6 +129,36 @@ impl From<SmartSchedulingConfig> for SmartSchedulingValues {
             latency_weight,
             reset_weight,
             queue_weight,
+            _legacy_prefer_higher_weight: false,
         }
+    }
+}
+
+
+#[cfg(test)]
+mod hot_settings_tests {
+    use super::*;
+
+    #[test]
+    fn hot_profile_legacy_scheduling_field() {
+        let expected = SmartSchedulingConfig::default();
+        let original = serde_json::to_value(expected).unwrap();
+        assert!(original.get("preferHigherWeight").is_none());
+        assert_eq!(serde_json::from_value::<SmartSchedulingConfig>(original.clone()).unwrap(), expected);
+        for legacy in [false, true] {
+            let mut stored = original.clone();
+            stored["preferHigherWeight"] = legacy.into();
+            let decoded = serde_json::from_value::<SmartSchedulingConfig>(stored).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), original);
+        }
+        for invalid in [serde_json::json!(null), serde_json::json!("false"), serde_json::json!(0)] {
+            let mut stored = original.clone();
+            stored["preferHigherWeight"] = invalid;
+            assert!(serde_json::from_value::<SmartSchedulingConfig>(stored).is_err());
+        }
+        let mut unknown = original;
+        unknown["unknownLegacyField"] = false.into();
+        assert!(serde_json::from_value::<SmartSchedulingConfig>(unknown).is_err());
     }
 }

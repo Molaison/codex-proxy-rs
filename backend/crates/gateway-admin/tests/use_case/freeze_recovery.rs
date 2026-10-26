@@ -38,6 +38,7 @@ fn runtime_settings(enabled: bool, probe_enabled: bool, adaptive: bool) -> Runti
             refresh_margin_seconds: 300,
             refresh_concurrency: 2,
             max_concurrent_per_account: 5,
+            request_interval_ms: 0,
             max_waiting_per_key: 0,
             max_waiting_per_account: 0,
             concurrency_wait_timeout_seconds: 30,

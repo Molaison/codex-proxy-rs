@@ -434,7 +434,7 @@ fn selection_failure(error: &GrokSessionSelectorError) -> ProviderError {
         GrokSessionSelectorError::CapacityUnavailable { retry_after } => (
             ProviderErrorKind::AccountCapacityUnavailable,
             *retry_after,
-            "account is at its concurrency limit".to_owned(),
+            "account is at its concurrency or request-interval limit".to_owned(),
             "account_capacity_busy",
         ),
         GrokSessionSelectorError::NoEligibleSession => (

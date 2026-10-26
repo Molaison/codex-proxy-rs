@@ -10,7 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 use axum::{
-    body::{Body, to_bytes},
+    body::{Body, BodyDataStream, to_bytes},
     extract::connect_info::ConnectInfo,
     http::{
         HeaderMap, HeaderValue, Request, StatusCode,
@@ -38,7 +38,7 @@ use gateway_core::event::{
 use gateway_core::operation::{Operation, OperationKind};
 use gateway_core::routing::PublicModelId;
 use gateway_core::upstream::{OpaqueUpstreamValue, UpstreamSendState};
-use gateway_protocol::openai::sse::{encode_sse_event, parse_sse_events};
+use gateway_protocol::openai::sse::{SseEvent, SseEventDecoder, encode_sse_event, parse_sse_events};
 use serde_json::{Value, json};
 
 use gateway_api::openai::responses::{collect_execution_response, stream_execution_response};
@@ -54,6 +54,30 @@ fn responses_middleware() -> RequestMiddleware {
         expected_operation: Some(OperationKind::Generate),
         ..RequestMiddleware::default()
     }
+}
+
+// Codex 的 idle deadline 等待解析后的事件；注释和不完整字节不能重置它。
+async fn next_sse_events(body: &mut BodyDataStream, decoder: &mut SseEventDecoder) -> Vec<SseEvent> {
+    loop {
+        let chunk = body
+            .next()
+            .await
+            .expect("SSE stream ended")
+            .expect("SSE bytes");
+        let events = decoder.push(&chunk).expect("valid SSE");
+        if !events.is_empty() {
+            return events;
+        }
+    }
+}
+
+fn assert_heartbeat(events: &[SseEvent]) {
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event.as_deref(), Some("response.heartbeat"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&events[0].data).unwrap(),
+        json!({"type": "response.heartbeat"})
+    );
 }
 
 #[derive(Default)]
@@ -1229,14 +1253,16 @@ async fn streaming_should_keep_alive_during_silent_compaction_without_restarting
     let first = body.next().await.expect("first frame").expect("body bytes");
     assert!(String::from_utf8_lossy(&first).contains("response.created"));
     let start = tokio::time::Instant::now();
+    let mut decoder = SseEventDecoder::default();
 
     for heartbeat in 1..16 {
-        let chunk = tokio::time::timeout(Duration::from_secs(20), body.next())
-            .await
-            .expect("silent upstream must not leave the downstream idle")
-            .expect("heartbeat frame")
-            .expect("heartbeat bytes");
-        assert_eq!(chunk, Bytes::from_static(b": keep-alive\n\n"));
+        let events = tokio::time::timeout(
+            Duration::from_secs(20),
+            next_sse_events(&mut body, &mut decoder),
+        )
+        .await
+        .expect("silent upstream must not leave the SSE parser idle");
+        assert_heartbeat(&events);
         assert_eq!(start.elapsed(), Duration::from_secs(15 * heartbeat));
     }
 
@@ -1287,7 +1313,10 @@ async fn dropping_stream_during_keepalive_should_cancel_and_finalize_execution()
         .expect("heartbeat before client disconnect")
         .expect("heartbeat frame")
         .expect("heartbeat bytes");
-    assert_eq!(heartbeat, Bytes::from_static(b": keep-alive\n\n"));
+    assert_eq!(
+        heartbeat,
+        Bytes::from_static(b"event: response.heartbeat\ndata: {\"type\":\"response.heartbeat\"}\n\n")
+    );
 
     drop(body);
     tokio::task::yield_now().await;
@@ -1324,13 +1353,15 @@ async fn streaming_keepalive_should_cover_four_minutes_before_first_event() {
     assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
     assert_eq!(trace.response_commit.status_code(), Some(200));
     let mut body = response.into_body().into_data_stream();
+    let mut decoder = SseEventDecoder::default();
     for heartbeat in 1..16 {
-        let chunk = tokio::time::timeout(Duration::from_secs(20), body.next())
-            .await
-            .expect("first-event wait must stay alive")
-            .expect("heartbeat")
-            .expect("bytes");
-        assert_eq!(chunk, Bytes::from_static(b": keep-alive\n\n"));
+        let events = tokio::time::timeout(
+            Duration::from_secs(20),
+            next_sse_events(&mut body, &mut decoder),
+        )
+        .await
+        .expect("first-event wait must keep the SSE parser alive");
+        assert_heartbeat(&events);
         assert_eq!(start.elapsed(), Duration::from_secs(15 * heartbeat));
         assert_eq!(trace.snapshot(), vec!["wait_event"]);
     }
@@ -1365,7 +1396,7 @@ async fn streaming_error_after_initial_keepalive_should_be_a_terminal_sse_failur
     assert!(!response.headers().contains_key("x-codex-turn-state"));
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let events = parse_sse_events(std::str::from_utf8(&bytes).unwrap()).unwrap();
-    assert!(String::from_utf8_lossy(&bytes).starts_with(": keep-alive\n\n"));
+    assert!(String::from_utf8_lossy(&bytes).starts_with("event: response.heartbeat\ndata: {\"type\":\"response.heartbeat\"}\n\n"));
     let failed = events
         .iter()
         .find(|event| event.event.as_deref() == Some("response.failed"))
@@ -1464,7 +1495,7 @@ async fn responses_http_connection_should_survive_a_shorter_read_idle_timeout() 
     let wire = String::from_utf8(received).unwrap();
     assert!(wire.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(wire.contains("x-accel-buffering: no\r\n"));
-    assert_eq!(wire.matches(": keep-alive\n\n").count(), 2);
+    assert_eq!(wire.matches("event: response.heartbeat\ndata: {\"type\":\"response.heartbeat\"}\n\n").count(), 2);
     assert!(wire.contains("response.completed"));
     assert!(wire.contains("data: [DONE]\n\n"));
     assert!(!trace.is_cancelled());
@@ -1491,7 +1522,7 @@ async fn dropping_stream_before_first_event_should_cancel_the_original_wait() {
     let mut body = response.into_body().into_data_stream();
     assert_eq!(
         body.next().await.unwrap().unwrap(),
-        Bytes::from_static(b": keep-alive\n\n")
+        Bytes::from_static(b"event: response.heartbeat\ndata: {\"type\":\"response.heartbeat\"}\n\n")
     );
     drop(body);
     tokio::task::yield_now().await;
@@ -3310,7 +3341,7 @@ async fn responses_route_should_keep_alive_while_request_middleware_waits_for_fi
         assert!(response.headers().contains_key("x-gateway-request-id"));
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let text = std::str::from_utf8(&bytes).unwrap();
-        assert!(text.starts_with(": keep-alive\n\n"));
+        assert!(text.starts_with("event: response.heartbeat\ndata: {\"type\":\"response.heartbeat\"}\n\n"));
         assert!(text.ends_with("data: [DONE]\n\n"));
         if invalid_output {
             assert!(text.contains("response.failed"));
@@ -3324,4 +3355,148 @@ async fn responses_route_should_keep_alive_while_request_middleware_waits_for_fi
         }
         assert_eq!(trace.client_statuses(), vec![200]);
     }
+}
+
+async fn short_queue_response(session: FakeSession) -> axum::response::Response {
+    use crate::openai::{
+        DefaultExecutionService, IgnoredClientApiKeyUsage, ProviderRegistry,
+        RuntimeSnapshotHandle, UnusedAdmissions, UnusedContinuation, UnusedExecutionStore,
+    };
+
+    let snapshot = crate::openai::snapshot("sk_queue_test", "openai");
+    let settings = snapshot.settings().clone().with_concurrency_queues(64, 0, 30);
+    let snapshot = snapshot.with_settings(&settings).unwrap();
+    let source = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(snapshot),
+        Arc::new(UnusedExecutionStore),
+        ProviderRegistry::default(),
+        Arc::new(UnusedAdmissions),
+        Arc::new(UnusedContinuation),
+        Arc::new(IgnoredClientApiKeyUsage),
+        Arc::new(crate::support::RecordingDiagnostics::default()),
+    );
+    let execution = Arc::new(SessionExecution {
+        client: source
+            .authenticate("sk_queue_test")
+            .expect("authenticated client"),
+        session: Mutex::new(Some(Box::new(session))),
+        middleware: None,
+    });
+    api_router(execution)
+        .await
+        .oneshot(
+            Request::post("/v1/responses")
+                .header(AUTHORIZATION, "Bearer sk_queue_test")
+                .body(Body::from(
+                    json!({"model":"model-a","input":"synthetic","stream":true}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn short_queue_keepalive_survives_two_minutes_and_delivers_the_original_execution() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::DelayedEvent(
+                Duration::from_secs(180),
+                delivery(started(), CommitRequirement::CommitBeforeDelivery),
+            ),
+            NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
+            NextStep::FinalizeSuccess,
+        ],
+    );
+    let response = short_queue_response(session).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    assert_eq!(response.headers()["x-accel-buffering"], "no");
+    assert!(trace.client_statuses().is_empty());
+    let mut body = response.into_body().into_data_stream();
+    let mut decoder = SseEventDecoder::default();
+    for _ in 0..11 {
+        let events = tokio::time::timeout(
+            Duration::from_secs(16),
+            next_sse_events(&mut body, &mut decoder),
+        )
+        .await
+        .expect("queue wait must keep the SSE parser alive");
+        assert_heartbeat(&events);
+        assert!(!trace.snapshot().contains(&"commit"));
+    }
+    let mut result = Vec::new();
+    while let Some(chunk) = body.next().await {
+        result.extend_from_slice(&chunk.unwrap());
+    }
+    let result = String::from_utf8(result).unwrap();
+    assert_eq!(result.matches("event: response.created").count(), 1);
+    assert_eq!(result.matches("event: response.completed").count(), 1);
+    assert_eq!(
+        trace
+            .snapshot()
+            .iter()
+            .filter(|event| **event == "wait_event")
+            .count(),
+        1
+    );
+    assert_eq!(
+        trace
+            .snapshot()
+            .iter()
+            .filter(|event| **event == "commit")
+            .count(),
+        1
+    );
+    assert!(!trace.is_cancelled());
+}
+
+#[tokio::test(start_paused = true)]
+async fn short_queue_keepalive_disconnect_cancels_the_pending_execution() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::DelayedEvent(
+                Duration::from_secs(180),
+                delivery(started(), CommitRequirement::CommitBeforeDelivery),
+            ),
+            NextStep::FinalizeCancelled,
+        ],
+    );
+    let response = short_queue_response(session).await;
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(
+        body.next().await.unwrap().unwrap(),
+        Bytes::from_static(b"event: response.heartbeat\ndata: {\"type\":\"response.heartbeat\"}\n\n")
+    );
+    drop(body);
+    tokio::task::yield_now().await;
+    assert!(trace.is_cancelled());
+    assert_eq!(trace.detached_finalizations(), 1);
+    assert!(!trace.snapshot().contains(&"commit"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn short_queue_keepalive_reports_delayed_failure_as_failed_sse() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![NextStep::DelayedError(
+            Duration::from_secs(45),
+            EngineError::Provider(ProviderError::new(
+                ProviderErrorKind::ConcurrencyQueueTimeout,
+                UpstreamSendState::NotSent,
+            )),
+        )],
+    );
+    let response = short_queue_response(session).await;
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("response.failed"));
+    assert!(body.contains("concurrency_queue_timeout"));
+    assert!(!body.contains("response.completed"));
+    assert!(body.ends_with("data: [DONE]\n\n"));
 }

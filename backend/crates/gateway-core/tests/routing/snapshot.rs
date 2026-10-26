@@ -136,6 +136,7 @@ fn compile_aliases(
         revision(1),
         SettingsValues::new(
             3,
+            50,
             "smart",
             BTreeMap::from([("configured".into(), "upstream-model".into())]),
             None,
@@ -472,7 +473,7 @@ fn compiler_accepts_unlimited_default_account_concurrency() {
     let facts = SnapshotFacts::new(
         revision(1),
         revision(1),
-        SettingsValues::new(0, "smart", BTreeMap::new(), None, None),
+        SettingsValues::new(0, 50, "smart", BTreeMap::new(), None, None),
         Vec::new(),
         Vec::new(),
         vec![SnapshotProviderAccountFacts::new(
@@ -498,6 +499,10 @@ fn compiler_accepts_unlimited_default_account_concurrency() {
         plan.account_selection_policy().max_concurrent_per_account(),
         gateway_core::account::AccountConcurrency::Unlimited
     );
+    assert_eq!(
+        plan.account_selection_policy().request_interval(),
+        std::time::Duration::from_millis(50)
+    );
 }
 
 #[test]
@@ -512,7 +517,7 @@ fn compiled_plans_keep_their_scheduling_config_after_a_new_snapshot_is_built() {
         let facts = SnapshotFacts::new(
             revision(index as u64 + 1),
             revision(index as u64 + 1),
-            SettingsValues::new(3, "smart", BTreeMap::new(), None, None)
+            SettingsValues::new(3, 0, "smart", BTreeMap::new(), None, None)
                 .with_smart_scheduling(config)
                 .with_openai_guardian_reserved_concurrency(index as u32),
             vec![],
@@ -568,6 +573,7 @@ fn withdrawn_provider_keeps_accounts_without_becoming_a_route_or_expanding_group
             revision(1),
             SettingsValues::new(
                 3,
+                0,
                 "smart",
                 BTreeMap::from([("alias".into(), "listed-model".into())]),
                 None,
@@ -1119,6 +1125,7 @@ fn facts_with_min_versions(
         revision(observed_current_revision),
         SettingsValues::new(
             3,
+            50,
             "smart",
             BTreeMap::from([("public-model".to_owned(), "upstream-model".to_owned())]),
             desktop,
@@ -1160,7 +1167,7 @@ fn global_request_location_should_be_frozen_when_snapshot_is_published() {
         let facts = SnapshotFacts::new(
             revision(version),
             revision(version),
-            SettingsValues::new(3, "smart", BTreeMap::new(), None, None)
+            SettingsValues::new(3, 0, "smart", BTreeMap::new(), None, None)
                 .with_request_location(location, enabled),
             Vec::new(),
             Vec::new(),
@@ -1237,7 +1244,7 @@ fn decompression_setting_should_validate_and_remain_frozen_across_publication() 
         let facts = SnapshotFacts::new(
             revision(version),
             revision(version),
-            SettingsValues::new(3, "smart", BTreeMap::new(), None, None)
+            SettingsValues::new(3, 0, "smart", BTreeMap::new(), None, None)
                 .with_responses_max_decompressed_body_bytes(bytes),
             Vec::new(),
             Vec::new(),
@@ -1300,7 +1307,7 @@ fn fast_mode_merges_only_bound_groups_without_changing_account_scope() {
                 let facts = SnapshotFacts::new(
                     revision(1),
                     revision(1),
-                    SettingsValues::new(3, "smart", BTreeMap::new(), None, None),
+                    SettingsValues::new(3, 0, "smart", BTreeMap::new(), None, None),
                     vec![SnapshotClientPolicyFacts::new(
                         ClientApiKeyId::new("key_fast_policy").unwrap(),
                         PlaintextClientApiKey::new("sk_fast_policy").unwrap(),
@@ -1381,7 +1388,7 @@ fn image_generation_merges_bound_groups_with_deny_precedence() {
                 let facts = SnapshotFacts::new(
                     revision(1),
                     revision(1),
-                    SettingsValues::new(3, "smart", BTreeMap::new(), None, None),
+                    SettingsValues::new(3, 0, "smart", BTreeMap::new(), None, None),
                     vec![SnapshotClientPolicyFacts::new(
                         ClientApiKeyId::new("key_fast_policy").unwrap(),
                         PlaintextClientApiKey::new("sk_fast_policy").unwrap(),
@@ -1454,7 +1461,7 @@ fn key_profiles_replace_whole_global_choice_and_previous_snapshot_stays_frozen()
     };
     let build = |global, overridden| {
         let profiles = BTreeMap::from([(provider.clone(), document(global))]);
-        let settings = SettingsValues::new(3, "smart", BTreeMap::new(), None, None)
+        let settings = SettingsValues::new(3, 0, "smart", BTreeMap::new(), None, None)
             .with_request_profiles(profiles);
         let inherited = SnapshotClientPolicyFacts::new(
             ClientApiKeyId::new("key_inherited").unwrap(),

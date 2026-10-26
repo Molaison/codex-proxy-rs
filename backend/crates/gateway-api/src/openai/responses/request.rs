@@ -220,7 +220,7 @@ pub struct ResponsesRequestMetadata {
 }
 
 impl ResponsesRequestMetadata {
-    /// 返回客户端原始模型名
+    /// 返回用于授权和执行的模型名（逻辑 Web 模型已解析为实际路由）。
     #[must_use]
     pub fn requested_model(&self) -> &str {
         &self.requested_model
@@ -469,6 +469,12 @@ pub(super) fn decode_request_object(
     if use_websocket.is_some() {
         object.remove("use_websocket");
     }
+
+    super::super::web_models::normalize_request(&mut object).map_err(|field| {
+        RequestDecodeError::InvalidValue {
+            field: field.to_owned(),
+        }
+    })?;
 
     let model = required_non_empty_string(&object, "model", "model")?;
     if model.trim().is_empty() {

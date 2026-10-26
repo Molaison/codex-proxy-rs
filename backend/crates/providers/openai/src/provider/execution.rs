@@ -763,6 +763,21 @@ fn image_response_metering(
     (usage != Usage::default()).then_some((usage, cost))
 }
 
+fn mark_encrypted_replay_rejection(
+    failure: &MappedProviderFailure,
+    key: Option<&ProviderSessionAffinityKey>,
+    recovery: &CodexSessionTransportRecovery,
+    request_id: &str,
+) {
+    let rejected = failure
+        .error
+        .upstream_code()
+        .is_some_and(|code| failure::is_encrypted_replay_failure_code(code.as_str()));
+    if rejected && let Some(key) = key {
+        recovery.require_encrypted_replay_sanitization(key, request_id);
+    }
+}
+
 pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     let ColdResponse {
         client,
@@ -785,6 +800,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     Box::pin(async_stream::try_stream! {
         let cyber_policy_scope = lease.cyber_policy_scope().cloned();
         let allows_account_state_mutation = lease.allows_account_state_mutation();
+        let request_local_retry = lease.authentication().request_local_retry();
         let failure_context = OpenAiFailureContext {
             client: &client,
             selector: &selector,
@@ -848,7 +864,8 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let response = response.map_err(map_handshake_attempt_error);
         let response = match response {
             Ok(response) => response,
-            Err(mut failure) => {
+            Err(failure) => {
+                let mut failure = failure.apply_request_local_retry(request_local_retry, ReplayBoundary::BeforeSemanticOutput);
                 if let Some(policy) = websocket_failure_policy {
                     apply_websocket_recovery_policy(
                         &mut failure,
@@ -870,7 +887,8 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 if let Some(observation) = failure.observation.take() {
                     yield ProviderEvent::observation(observation);
                 }
-                apply_failure(&failure_context, &active_account, &failure)
+                mark_encrypted_replay_rejection(&failure, session_transport_key.as_ref(), &session_transport_recovery, context.request_id().as_str());
+                    apply_failure(&failure_context, &active_account, &failure)
                 .await;
                 Err(quota_continuation_replay_error(
                     failure.error,
@@ -886,7 +904,8 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 ProviderErrorKind::Protocol,
                 UpstreamSendState::Sent,
             ));
-            apply_failure(&failure_context, &active_account, &failure)
+            mark_encrypted_replay_rejection(&failure, session_transport_key.as_ref(), &session_transport_recovery, context.request_id().as_str());
+                    apply_failure(&failure_context, &active_account, &failure)
             .await;
             Err(failure.error)?;
             return;
@@ -1011,7 +1030,8 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             };
             let next = match next {
                 Ok(next) => next,
-                Err(mut failure) => {
+                Err(failure) => {
+                    let mut failure = failure.apply_request_local_retry(request_local_retry, ReplayBoundary::from_semantic_output(client_events.replay_closed()));
                     let updates = take_rate_limit_updates(rate_limit_updates.as_ref()).await;
                     let rate_limits_changed = if updates.is_empty() {
                         false
@@ -1065,6 +1085,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         )
                         .await;
                     }
+                    mark_encrypted_replay_rejection(&failure, session_transport_key.as_ref(), &session_transport_recovery, context.request_id().as_str());
                     apply_failure(&failure_context, &active_account, &failure)
                     .await;
                     Err(quota_continuation_replay_error(
@@ -1129,6 +1150,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         ReplayBoundary::from_semantic_output(
                             semantic_output_seen || client_events.replay_closed(),
                         ),
+                        request_local_retry,
                     ),
                     atomic_upstream_failure,
                 )
@@ -1192,6 +1214,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 yield ProviderEvent::observation(observation);
             }
             if let Some((mut failure, atomic_upstream_failure)) = terminal_failure {
+                mark_encrypted_replay_rejection(&failure, session_transport_key.as_ref(), &session_transport_recovery, context.request_id().as_str());
                 let failure_after_commit =
                     timing_signals.semantic_output || client_events.replay_closed();
                 if failure_after_commit {
@@ -1244,6 +1267,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     ReplayBoundary::from_semantic_output(
                         semantic_output_seen || client_events.replay_closed(),
                     ),
+                        request_local_retry,
                 ),
                 atomic_upstream_failure,
             )
@@ -1325,6 +1349,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             yield ProviderEvent::observation(observation);
         }
         if let Some((mut failure, atomic_upstream_failure)) = terminal_failure {
+                mark_encrypted_replay_rejection(&failure, session_transport_key.as_ref(), &session_transport_recovery, context.request_id().as_str());
             let failure_after_commit =
                 timing_signals.semantic_output || client_events.replay_closed();
             if failure_after_commit {

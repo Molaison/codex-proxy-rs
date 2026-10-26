@@ -82,7 +82,7 @@ async fn cyber_policy_rotation_preserves_upstream_response_and_next_request_stay
     let kind = ProviderKind::new("openai").unwrap();
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).unwrap(),
-        SettingsValues::new(3, "smart", Default::default(), None, None)
+        SettingsValues::new(3, 0, "smart", Default::default(), None, None)
             .with_request_location(global_request_location(), true),
         vec![kind.clone()],
         vec![ProviderModel::new(

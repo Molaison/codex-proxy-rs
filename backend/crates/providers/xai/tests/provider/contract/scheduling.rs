@@ -183,7 +183,7 @@ async fn filtered_scheduling_covers_lease_retry_waiting_and_pinned_terminal_reje
         let kind = ProviderKind::new("xai").unwrap();
         let snapshot = RuntimeSnapshot::new(
             ConfigRevision::new(1).unwrap(),
-            gateway_core::settings::SettingsValues::new(2, "smart", Default::default(), None, None),
+            gateway_core::settings::SettingsValues::new(2, 0, "smart", Default::default(), None, None),
             vec![kind.clone()],
             vec![ProviderModel::new(
                 kind,

@@ -1224,7 +1224,7 @@ async fn relaxed_and_preferred_session_requests_apply_distinct_scheduling_polici
                 let provider_kind = ProviderKind::new("openai").unwrap();
                 let snapshot = RuntimeSnapshot::new(
                     ConfigRevision::new(1).unwrap(),
-                    SettingsValues::new(2, "smart", BTreeMap::new(), None, None),
+                    SettingsValues::new(2, 10, "smart", BTreeMap::new(), None, None),
                     vec![provider_kind.clone()],
                     Vec::new(),
                     Vec::new(),
@@ -1690,12 +1690,16 @@ async fn preferred_unavailable_primary_can_recover_without_losing_its_binding() 
         server.uri(),
         leases.clone(),
     );
-    let policy = AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(2).unwrap())
-        .with_openai_account_affinity(AccountAffinity::Preferred)
-        .with_queue(ConcurrencyQueuePolicy {
-            max_waiting: 10,
-            timeout: Duration::from_secs(1),
-        });
+    let policy = AccountSelectionPolicy::new(
+        RotationStrategy::Smart,
+        NonZeroU32::new(2).unwrap(),
+        Duration::from_secs(30),
+    )
+    .with_openai_account_affinity(AccountAffinity::Preferred)
+    .with_queue(ConcurrencyQueuePolicy {
+        max_waiting: 10,
+        timeout: Duration::from_secs(1),
+    });
     let select = || {
         provider.clone().execute(
             planned_request("openai", turn_request("root", "availability-turn")),
@@ -1709,7 +1713,7 @@ async fn preferred_unavailable_primary_can_recover_without_losing_its_binding() 
     drop(select().await.unwrap());
     create_account(&store, "acct_subagent_b").await;
     let primary = ProviderAccountId::new("acct_subagent_a").unwrap();
-    for reason in ["concurrency", "disabled", "quota"] {
+    for reason in ["concurrency", "interval", "disabled", "quota"] {
         let mut signals = AccountRuntimeSignals {
             in_flight: 0,
             last_started_at: None,
@@ -1721,6 +1725,7 @@ async fn preferred_unavailable_primary_can_recover_without_losing_its_binding() 
         };
         match reason {
             "concurrency" => signals.in_flight = 2,
+            "interval" => signals.last_started_at = Some(SystemTime::now()),
             "disabled" => {
                 store.set_enabled(&primary, false).await.unwrap();
             }

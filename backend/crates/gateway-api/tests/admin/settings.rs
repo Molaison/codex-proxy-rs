@@ -50,6 +50,7 @@ fn update_body() -> Value {
         "refreshMarginSeconds": 1800,
         "refreshConcurrency": 4,
         "maxConcurrentPerAccount": 5,
+        "requestIntervalMs": 25,
         "maxWaitingPerKey": 0,
         "maxWaitingPerAccount": 0,
         "openaiGuardianReservedConcurrency": 0,
@@ -386,6 +387,7 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             refresh_margin_seconds: 1800,
             refresh_concurrency: 4,
             max_concurrent_per_account: 5,
+            request_interval_ms: 25,
             max_waiting_per_key: 0,
             max_waiting_per_account: 0,
             concurrency_wait_timeout_seconds: 30,
@@ -437,6 +439,7 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "refreshMarginSeconds": 1800,
             "refreshConcurrency": 4,
             "maxConcurrentPerAccount": 5,
+            "requestIntervalMs": 25,
             "maxWaitingPerKey": 0,
             "maxWaitingPerAccount": 0,
             "openaiGuardianReservedConcurrency": 0,
@@ -516,6 +519,7 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
             refresh_concurrency: u32::try_from(request.values.refresh_concurrency).expect("u32"),
             max_concurrent_per_account: u32::try_from(request.values.max_concurrent_per_account)
                 .expect("u32"),
+            request_interval_ms: request.values.request_interval_ms,
             max_waiting_per_key: 0,
             max_waiting_per_account: 0,
             concurrency_wait_timeout_seconds: 30,
@@ -803,7 +807,7 @@ fn concurrency_queue_fields_validate_bounds_and_accept_disabled_queues() {
         ("maxWaitingPerKey", 1001),
         ("maxWaitingPerAccount", 1001),
         ("concurrencyWaitTimeoutSeconds", 0),
-        ("concurrencyWaitTimeoutSeconds", 121),
+        ("concurrencyWaitTimeoutSeconds", 3601),
     ] {
         let mut body = update_body();
         body[field] = json!(invalid);
@@ -813,7 +817,7 @@ fn concurrency_queue_fields_validate_bounds_and_accept_disabled_queues() {
     let mut body = update_body();
     body["maxWaitingPerKey"] = json!(0);
     body["maxWaitingPerAccount"] = json!(1000);
-    body["concurrencyWaitTimeoutSeconds"] = json!(120);
+    body["concurrencyWaitTimeoutSeconds"] = json!(3600);
     serde_json::from_value::<UpdateRuntimeSettingsRequest>(body)
         .unwrap()
         .validate()

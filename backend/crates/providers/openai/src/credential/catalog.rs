@@ -25,7 +25,9 @@ use uuid::Uuid;
 
 use super::repository::{CodexCredentialRepository, CredentialRepositoryError};
 use crate::transport::profile::{CodexWireProfile, CodexWireProfileState};
-use crate::transport::{CodexBackendClient, CodexCatalogModel, CodexRequestContext};
+use crate::transport::{
+    CodexBackendClient, CodexCatalogCapabilityEvidence, CodexCatalogModel, CodexRequestContext,
+};
 
 const MAX_RESPONSE_ETAG_BYTES: usize = 256;
 const PLAN_CATALOG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -338,7 +340,8 @@ impl CodexCredentialCatalogService {
             }
         }
         drop(catalogs);
-        // 完整对象优先于普通 ID；同类目录按账号顺序选来源，并保留上游条目顺序
+        let has_api_catalog = !api_catalogs.is_empty();
+        // 完整对象优先于普通 ID；同类目录按账号顺序选来源，并保留上游条目顺序。
         let (native, adapted): (Vec<_>, Vec<_>) = api_catalogs
             .into_values()
             .flatten()
@@ -375,7 +378,7 @@ impl CodexCredentialCatalogService {
                 Err(error) => last_error = error,
             }
         }
-        if api_models.is_empty() {
+        if api_models.is_empty() && !has_api_catalog {
             Err(last_error)
         } else {
             Ok(api_models)
@@ -437,6 +440,13 @@ impl CodexCredentialCatalogService {
                         fetched
                             .models
                             .into_iter()
+                            // 标准目录明确排除 Responses 的模型不能作为 Codex 模型发布。
+                            // 原生对象仍由上游决定可见性，不改写 OAuth 的 advisory 字段。
+                            .filter(|model| {
+                                model.document().protocol() == "codex"
+                                    || model.capabilities().responses_api()
+                                        != CodexCatalogCapabilityEvidence::DeclaredUnsupported
+                            })
                             .map(|model| ProviderModelDescriptor {
                                 model: model.request_model().clone(),
                                 content: if model.document().protocol() == "codex" {
@@ -444,8 +454,14 @@ impl CodexCredentialCatalogService {
                                 } else {
                                     ProviderModelContent::Adapted(
                                         ModelPresentation::new(
-                                            Some(model.request_model().as_str().to_owned()),
+                                            Some(model.display_name().to_owned()),
                                             None,
+                                        )
+                                        .with_context_window_tokens(
+                                            model
+                                                .limits()
+                                                .context_window_tokens()
+                                                .map(std::num::NonZeroU64::get),
                                         )
                                         .with_agent_tools(true, false),
                                     )
@@ -555,6 +571,7 @@ impl CodexCredentialCatalogService {
         let fetched = self.fetch_scope_models(&client, candidates).await?;
         let catalog = CodexPlanCatalog::new(scope, Utc::now(), model_ids(&fetched.models));
         self.replace_plan_catalog(&catalog).await?;
+        self.invalidate()?;
         Ok(catalog)
     }
 

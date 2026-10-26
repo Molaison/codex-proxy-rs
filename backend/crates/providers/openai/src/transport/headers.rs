@@ -23,6 +23,7 @@ pub(super) fn is_managed_identity_header(name: &str) -> bool {
         name,
         "authorization"
             | "x-api-key"
+            | "x-cpr-client-id"
             | "x-openai-actor-authorization"
             | "cookie"
             | "cookie2"
@@ -227,6 +228,13 @@ impl CodexBackendClient {
         insert_optional_protocol_header(&mut headers, "x-codex-routing-hint", Some(&routing_hint));
         append_passthrough_headers(&mut headers, &request.passthrough_headers);
         self.append_middleware_headers(&mut headers)?;
+        // 调用身份只由已鉴权 attempt 决定，客户端或插件头不能覆盖。
+        headers.remove("x-cpr-client-id");
+        insert_optional_header(
+            &mut headers,
+            "x-cpr-client-id",
+            request.forwarded_client_id.as_deref(),
+        )?;
         Ok(headers)
     }
 

@@ -18,7 +18,7 @@ async fn concurrency_details_follow_renewal_fencing_release_and_expiry() {
     let Some((repository, mut connection, namespace)) = repository().await else {
         return;
     };
-    let mut request = scheduling_request("acct_details", "worker", 2);
+    let mut request = scheduling_request("acct_details", "worker", 2, Duration::ZERO);
     request.ttl = Duration::from_millis(500);
     let guard = acquired(
         repository
@@ -117,7 +117,7 @@ async fn concurrency_details_bound_deep_pages_and_ignore_expired_and_reserved_le
     let Some((repository, mut connection, namespace)) = repository().await else {
         return;
     };
-    let request = scheduling_request("acct_large_details", "worker", 0);
+    let request = scheduling_request("acct_large_details", "worker", 0, Duration::ZERO);
     let guard = acquired(
         repository
             .try_acquire_bounded_lease_with_metadata(&request, Some(&request_facts()))

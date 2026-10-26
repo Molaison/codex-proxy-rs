@@ -99,7 +99,7 @@ fn account_scheduling_should_default_and_resolve_concurrency_override() {
 
 fn context(strategy: RotationStrategy) -> AccountSelectionContext {
     AccountSelectionContext {
-        policy: AccountSelectionPolicy::new(strategy, NonZeroU32::new(3).expect("positive")),
+        policy: AccountSelectionPolicy::new(strategy, NonZeroU32::new(3).expect("positive"), Duration::ZERO),
         now: SystemTime::now(),
         excluded_accounts: BTreeSet::new(),
         busy_accounts: Default::default(),
@@ -468,6 +468,7 @@ fn highest_priority_affinity_should_still_obey_existing_scheduling_constraints()
     for blocker in [
         AccountSchedulingBlocker::Excluded,
         AccountSchedulingBlocker::ConcurrencyLimit,
+        AccountSchedulingBlocker::RequestInterval,
         AccountSchedulingBlocker::LocalAvailability,
     ] {
         let mut candidates = [
@@ -484,6 +485,14 @@ fn highest_priority_affinity_should_still_obey_existing_scheduling_constraints()
                     .insert(candidates[0].account.id().clone());
             }
             AccountSchedulingBlocker::ConcurrencyLimit => candidates[0].signals.in_flight = 3,
+            AccountSchedulingBlocker::RequestInterval => {
+                candidates[0].signals.last_started_at = Some(selection.now);
+                selection.policy = AccountSelectionPolicy::new(
+                    RotationStrategy::Smart,
+                    NonZeroU32::new(3).expect("limit"),
+                    Duration::from_secs(1),
+                );
+            }
             AccountSchedulingBlocker::LocalAvailability => {
                 candidates[0].signals.cooldown =
                     Some((selection.now + Duration::from_secs(60)).into())
@@ -776,25 +785,25 @@ fn selector_should_reject_account_at_concurrency_limit() {
 }
 
 #[test]
-fn selector_should_allow_immediate_reuse_regardless_of_last_started_time() {
+fn selector_should_enforce_request_interval_until_boundary() {
     let now = SystemTime::now();
-    for last_started in [
-        now - Duration::from_millis(1),
-        now,
-        now + Duration::from_secs(30),
-    ] {
-        let mut candidate = candidate("acct_recent", 1, None);
-        candidate.signals.last_started_at = Some(last_started);
-        let candidates = [candidate];
-        let mut context = context(RotationStrategy::Sticky);
-        context.now = now;
-        context.preferred_account = Some(candidates[0].account.id().clone());
-        let selected = AccountSelector
-            .select(&candidates, &context)
-            .expect("available slot");
-        assert_eq!(selected.candidate().account.id().as_str(), "acct_recent");
-        assert_eq!(selected.preferred(), PreferredAccountSelection::Hit);
-    }
+    let mut cooling = candidate("acct_cooling", 0, Some(100));
+    cooling.signals.last_started_at = Some(now - Duration::from_millis(9));
+    let mut ready = candidate("acct_ready", 0, Some(1));
+    ready.signals.last_started_at = Some(now - Duration::from_millis(10));
+    let candidates = vec![cooling, ready];
+    let mut context = context(RotationStrategy::Smart);
+    context.now = now;
+    context.policy = AccountSelectionPolicy::new(
+        RotationStrategy::Smart,
+        NonZeroU32::new(3).expect("positive"),
+        Duration::from_millis(10),
+    );
+    let selected = AccountSelector
+        .select(&candidates, &context)
+        .expect("candidate available");
+
+    assert_eq!(selected.candidate().account.id().as_str(), "acct_ready");
 }
 
 #[test]
@@ -1124,6 +1133,7 @@ fn reserved_capacity_stays_bounded_when_normal_concurrency_is_unlimited() {
     normal.policy = AccountSelectionPolicy::new(
         RotationStrategy::Smart,
         gateway_core::account::AccountConcurrency::Unlimited,
+        Duration::ZERO,
     );
     assert!(AccountSelector.select(&candidates, &normal).is_some());
     assert!(

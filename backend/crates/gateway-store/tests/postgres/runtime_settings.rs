@@ -24,6 +24,7 @@ pub(super) fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettin
             refresh_margin_seconds,
             refresh_concurrency: 2,
             max_concurrent_per_account: 3,
+            request_interval_ms: 50,
             max_waiting_per_key: 0,
             max_waiting_per_account: 0,
             concurrency_wait_timeout_seconds: 30,
@@ -58,49 +59,6 @@ pub(super) fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettin
 fn runtime_settings_keep_account_rotation_global() {
     let settings = settings_with_margin(3_600);
     assert!(settings.validate().is_ok());
-}
-
-#[tokio::test]
-async fn removing_request_interval_preserves_settings_and_snapshot() {
-    use gateway_store::postgres::{PgRuntimeSnapshotRepository, RuntimeSnapshotRepository};
-    let Some(database) = TestDatabase::create_through("drop_interval", 29).await else {
-        return;
-    };
-    sqlx::query("update runtime_settings set request_interval_ms = 60000, max_concurrent_per_account = 7, refresh_concurrency = 12, refresh_margin_seconds = 1234, config_revision = 70 where id = 1")
-        .execute(&database.pool).await.unwrap();
-    super::TEST_MIGRATOR.run(&database.pool).await.unwrap();
-    let column_exists: bool = sqlx::query_scalar("select exists(select 1 from information_schema.columns where table_schema = current_schema() and table_name = 'runtime_settings' and column_name = 'request_interval_ms')")
-        .fetch_one(&database.pool).await.unwrap();
-    assert!(!column_exists);
-    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
-    let settings = repository.load_runtime_settings().await.unwrap();
-    assert_eq!(settings.values.max_concurrent_per_account, 7);
-    assert_eq!(settings.values.refresh_concurrency, 12);
-    assert_eq!(settings.values.refresh_margin_seconds, 1234);
-    let snapshot = PgRuntimeSnapshotRepository::new(database.pool.clone())
-        .load_runtime_snapshot()
-        .await
-        .unwrap();
-    assert!(
-        serde_json::to_value(snapshot.settings)
-            .unwrap()
-            .get("request_interval_ms")
-            .is_none()
-    );
-    repository
-        .update_runtime_settings(settings_with_margin(600))
-        .await
-        .unwrap();
-    assert_eq!(
-        repository
-            .load_runtime_settings()
-            .await
-            .unwrap()
-            .values
-            .refresh_margin_seconds,
-        600
-    );
-    database.close().await;
 }
 
 #[tokio::test]
@@ -416,6 +374,7 @@ async fn unlimited_default_account_concurrency_round_trips_without_relaxing_othe
         "update runtime_settings set max_concurrent_per_account = -1 where id = 1",
         "update runtime_settings set refresh_concurrency = 0 where id = 1",
         "update runtime_settings set refresh_margin_seconds = 0 where id = 1",
+        "update runtime_settings set request_interval_ms = -1 where id = 1",
     ] {
         let error = sqlx::query(statement)
             .execute(&database.pool)

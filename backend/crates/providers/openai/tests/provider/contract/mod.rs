@@ -1,5 +1,6 @@
 //! OpenAI 执行合同测试入口，以及协议转换与发送前校验测试
 
+mod full_tools_interleaving;
 mod account_isolation;
 mod capacity;
 mod cookies;
@@ -1397,7 +1398,7 @@ fn planned_request_with_presentation(
     }
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("revision"),
-        gateway_core::settings::SettingsValues::new(2, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(2, 10, "smart", Default::default(), None, None),
         vec![provider],
         vec![catalog_model],
         Vec::new(),
@@ -1426,7 +1427,7 @@ fn planned_provider_endpoint_request(provider_name: &str, operation: Operation) 
     ));
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("revision"),
-        gateway_core::settings::SettingsValues::new(2, "smart", Default::default(), None, None),
+        gateway_core::settings::SettingsValues::new(2, 10, "smart", Default::default(), None, None),
         vec![provider.clone()],
         Vec::new(),
         Vec::new(),
@@ -1473,6 +1474,8 @@ fn contract_account_scope() -> Arc<FrozenAccountScope> {
         "acct_unknown_continuation",
         "acct_unknown_turn_state",
         "acct_prefetch_limit",
+        "acct_request_local_retry_off",
+        "acct_request_local_retry_on",
         "acct_presentation",
         "acct_provider_contract",
         "acct_scope_new",
@@ -8478,10 +8481,98 @@ async fn capacity_http_and_websocket_opening_rejections_use_bounded_business_ret
                     initial_delay,
                     max_delay,
                     jitter,
+                    policy: gateway_core::error::TransientRetryPolicy::RetryThenReturnError,
+                }) if max_retries.get() == 5
+                    && initial_delay == Duration::from_secs(60)
+                    && max_delay == Duration::from_secs(60)
+                    && jitter.is_zero())
+            );
+            assert!(provider_openai::openai_failure_affects_account_score(
+                &error
+            ));
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    error.raw_upstream_error().expect("original error").as_str()
+                )
+                .expect("JSON"),
+                body
+            );
+            let response = error
+                .client_visible_upstream_response()
+                .expect("client response");
+            assert_eq!(response.status(), status);
+            assert_eq!(response.body().as_ref(), body.to_string().as_bytes());
+            let account = store.account(account_id).expect("account");
+            assert_eq!(account.quota().access(), QuotaAccessState::Unknown);
+            assert_eq!(account.credential_state(), CredentialState::Ready);
+        }
+    }
+}
+
+#[tokio::test]
+async fn api_key_capacity_without_local_retry_uses_bounded_business_retry() {
+    for use_websocket in [false, true] {
+        for status in [400, 429, 503] {
+            let store = Arc::new(MemoryAccountStore::default());
+            let account_id = "acct_provider_contract";
+            let server = MockServer::start().await;
+            store.seed_api_key(account_id, server.uri(),
+                if use_websocket { provider_openai::credential::ResponsesTransport::PreferWebsocket }
+                else { provider_openai::credential::ResponsesTransport::Http }).await;
+            store.set_api_key_request_local_retry(account_id, false);
+            let body = json!({"error": {
+                "code": match status {
+                    429 => Some("slow_down"),
+                    503 => Some("server_is_overloaded"),
+                    _ => None,
+                },
+                "type": "server_error",
+                "message": "Selected model is at capacity. Please try a different model.",
+                "extension": {"preserved": true}
+            }});
+            Mock::given(method(if use_websocket { "GET" } else { "POST" }))
+                .and(path("/responses"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("retry-after", "129600")
+                        .set_body_json(body.clone()),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let operation = if use_websocket {
+                generate_operation()
+            } else {
+                http_generate_operation()
+            };
+            let mut stream = provider_with_base_url(&store, server.uri())
+                .execute(
+                    planned_request("openai", operation),
+                    context("req_capacity", CancellationToken::new()),
+                )
+                .await
+                .expect("prepare stream");
+            let error = loop {
+                match stream.next().await {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => break error,
+                    None => panic!("expected capacity rejection"),
+                }
+            };
+            assert_eq!(error.kind(), ProviderErrorKind::UpstreamCapacityUnavailable);
+            assert_eq!(error.upstream_status(), Some(status));
+            assert!(error.replay_is_safe());
+            assert_eq!(error.retry_after(), Some(Duration::from_secs(129600)));
+            assert!(
+                matches!(error.pre_delivery_retry(), Some(PreDeliveryRetry::SameAccountTransientRetry {
+                    max_retries,
+                    initial_delay,
+                    max_delay,
+                    jitter,
                     policy: gateway_core::error::TransientRetryPolicy::RetryThenRotateAccount,
-                }) if max_retries.get() == 3
+                }) if max_retries.get() == 8
                     && initial_delay == Duration::from_millis(500)
-                    && max_delay == Duration::from_secs(8)
+                    && max_delay == Duration::from_secs(60)
                     && jitter.is_zero())
             );
             assert!(provider_openai::openai_failure_affects_account_score(
@@ -12672,6 +12763,7 @@ async fn public_catalog_filters_each_api_account_before_union_without_gating_inf
             revision,
             SettingsValues::new(
                 3,
+                0,
                 "smart",
                 BTreeMap::from([
                     ("gpt-public".into(), "gpt-5.4".into()),
@@ -12749,5 +12841,331 @@ async fn public_catalog_filters_each_api_account_before_union_without_gating_inf
                 .collect::<Vec<_>>(),
             ["gpt-5.4", "gpt-public"]
         );
+    }
+}
+
+#[tokio::test]
+async fn full_tools_models_should_use_a_dedicated_session_affinity_namespace() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_session_affinity").await;
+    create_account(&store, "acct_local_affinity").await;
+    let affinity = Arc::new(MemorySessionAffinity::default());
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .mount(&server)
+        .await;
+    let provider = provider_with_affinity_and_base_url(&store, Arc::clone(&affinity), server.uri());
+    let client_key = ClientApiKeyId::new("key_openai_contract").expect("client key");
+    let session_id = "full-tools-session";
+    let affinity_key = |model: &str, thread_id: Option<&str>| {
+        let mut body = Map::from_iter([
+            ("model".to_owned(), json!(model)),
+            ("input".to_owned(), json!("hello")),
+            ("session_id".to_owned(), json!(session_id)),
+        ]);
+        if let Some(thread_id) = thread_id {
+            body.insert("thread_id".to_owned(), json!(thread_id));
+        }
+        provider
+            .request_observation(
+                &Operation::Generate(GenerateRequest::from_protocol_payload(
+                    ProtocolPayload::json_object("openai", body).expect("OpenAI payload"),
+                )),
+                &client_key,
+            )
+            .continuation
+            .affinity_hash
+            .expect("affinity hash")
+    };
+
+    let full_tools = affinity_key("chatgpt-web/gpt-5.6-sol-tools", None);
+    let full_tools_pro = affinity_key("chatgpt-web/gpt-6-pro-tools", None);
+    let native = affinity_key("gpt-5.6-luna", None);
+    let deepseek = affinity_key("deepseek/deepseek-v4-pro", None);
+    let web_non_tools = affinity_key("chatgpt-web/light", None);
+    let other_scope_tools = affinity_key("other-family/model-tools", None);
+    let full_tools_child = affinity_key("chatgpt-web/gpt-5.6-sol-tools", Some("child-one"));
+    let full_tools_child_pro = affinity_key("chatgpt-web/gpt-6-pro-tools", Some("child-one"));
+
+    assert_eq!(
+        full_tools, full_tools_pro,
+        "Full 工具族共用同一独立命名空间"
+    );
+    assert_eq!(native, deepseek, "其他模型继续共用默认命名空间");
+    assert_ne!(
+        full_tools, native,
+        "Full 工具族必须与默认命名空间分离，否则普通模型会迁移工具会话绑定"
+    );
+    assert_eq!(
+        web_non_tools, native,
+        "同 scope 的非工具变体仍属于默认命名空间"
+    );
+    assert_eq!(
+        other_scope_tools, native,
+        "其他 scope 的 -tools 名字不受影响"
+    );
+    assert_ne!(full_tools_child, full_tools, "hot profile preserves child-thread keys; initial account preference inherits the root key");
+    assert_eq!(
+        full_tools_child, full_tools_child_pro,
+        "子线程键仍在 Full 命名空间内"
+    );
+
+    let provider_kind = ProviderKind::new("openai").expect("provider");
+    affinity.seed_binding(
+        &provider_kind,
+        &full_tools,
+        ProviderAccountId::new("acct_session_affinity").expect("account"),
+    );
+    affinity.seed_binding(
+        &provider_kind,
+        &native,
+        ProviderAccountId::new("acct_local_affinity").expect("account"),
+    );
+
+    // mock 上游只回 response.completed，让成功后的亲和 CAS 真正执行。
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .expect(4)
+        .mount(&upstream)
+        .await;
+    let stream_provider =
+        provider_with_affinity_and_base_url(&store, Arc::clone(&affinity), upstream.uri());
+
+    // 每个交错顺序都消费完整响应；普通模型的成功 CAS 不得迁移 Full 工具绑定。
+    for (request_id, model, expected) in [
+        (
+            "req_native_before_full",
+            "gpt-5.6-luna",
+            "acct_local_affinity",
+        ),
+        (
+            "req_full_tools_before_native",
+            "chatgpt-web/gpt-5.6-sol-tools",
+            "acct_session_affinity",
+        ),
+        ("req_native_between", "gpt-5.6-luna", "acct_local_affinity"),
+        (
+            "req_full_tools_after_native",
+            "chatgpt-web/gpt-5.6-sol-tools",
+            "acct_session_affinity",
+        ),
+    ] {
+        let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(
+                "openai",
+                Map::from_iter([
+                    ("model".to_owned(), json!(model)),
+                    ("input".to_owned(), json!("hello")),
+                    ("session_id".to_owned(), json!(session_id)),
+                ]),
+            )
+            .expect("OpenAI payload")
+            .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))])),
+        ));
+        let mut stream = Arc::clone(&stream_provider)
+            .execute(
+                planned_request_for_model("openai", operation, model),
+                context(request_id, CancellationToken::new()),
+            )
+            .await
+            .expect("prepare provider stream");
+        assert_eq!(
+            stream.metadata().provider_account_id().as_str(),
+            expected,
+            "{request_id}"
+        );
+        let mut completed = false;
+        while let Some(event) = stream.next().await {
+            let event = event.expect("successful interleaved response");
+            completed |= event.wire_event().is_some_and(|wire| {
+                wire.data().get("type").and_then(Value::as_str) == Some("response.completed")
+            });
+        }
+        assert!(
+            completed,
+            "{request_id} must reach the success/CAS boundary"
+        );
+    }
+
+    assert_eq!(
+        affinity.binding_count(),
+        2,
+        "两个命名空间各自保留绑定，普通模型流量不得迁移 Full 工具绑定"
+    );
+}
+
+#[tokio::test]
+async fn api_key_request_local_retry_covers_explicit_http_transient_statuses() {
+    use gateway_core::error::PreDeliveryRetry;
+    use provider_openai::credential::ResponsesTransport;
+
+    for status in [429, 500, 502, 503, 504, 520, 521, 522, 523, 524] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("content-type", "application/json")
+                    .insert_header("retry-after", "120")
+                    .set_body_json(json!({"error":{"message":"temporary upstream rejection"}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        store
+            .seed_api_key(
+                "acct_atomic_failure",
+                server.uri(),
+                ResponsesTransport::Http,
+            )
+            .await;
+        store.set_api_key_request_local_retry("acct_atomic_failure", true);
+
+        let mut stream = provider_with_base_url(&store, server.uri())
+            .execute(
+                planned_request("openai", http_generate_operation()),
+                context(
+                    &format!("req_request_local_retry_http_{status}"),
+                    CancellationToken::new(),
+                ),
+            )
+            .await
+            .expect("prepare provider stream");
+        let failure = loop {
+            match stream.next().await {
+                Some(Ok(event)) => assert!(!event.has_client_event()),
+                Some(Err(error)) => break error,
+                None => panic!("HTTP rejection must fail"),
+            }
+        };
+        match failure.pre_delivery_retry() {
+            Some(PreDeliveryRetry::SameAccountTransientRetry {
+                max_retries,
+                initial_delay,
+                max_delay,
+                ..
+            }) => {
+                assert_eq!(max_retries.get(), 5, "status={status}");
+                assert_eq!(initial_delay, Duration::from_secs(60), "status={status}");
+                assert_eq!(max_delay, Duration::from_secs(60), "status={status}");
+            }
+            retry => panic!("status={status} missing local retry: {retry:?}"),
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn request_local_retry_does_not_retry_structured_insufficient_quota() {
+    use provider_openai::credential::ResponsesTransport;
+
+    let account_id = "acct_atomic_failure";
+    let store = Arc::new(MemoryAccountStore::default());
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({
+                    "error": {
+                        "type": "insufficient_quota",
+                        "code": "insufficient_quota",
+                        "message": "quota exhausted"
+                    }
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    store
+        .seed_api_key(account_id, server.uri(), ResponsesTransport::Http)
+        .await;
+    store.set_api_key_request_local_retry(account_id, true);
+
+    let mut stream = provider_with_base_url(&store, server.uri())
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_request_local_retry_quota", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare provider stream");
+    let failure = loop {
+        match stream.next().await {
+            Some(Ok(event)) => assert!(!event.has_client_event()),
+            Some(Err(error)) => break error,
+            None => panic!("quota response must fail"),
+        }
+    };
+    // HTTP 429 is intentionally diagnosed as RateLimited first; the structured
+    // insufficient_quota code must still deny the request-local replay budget.
+    assert_eq!(failure.kind(), ProviderErrorKind::RateLimited);
+    assert!(failure.pre_delivery_retry().is_none());
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn api_key_forward_client_identity_is_authenticated_and_opt_in() {
+    for enabled in [false, true] {
+        let upstream = MockServer::start().await;
+        let store = Arc::new(MemoryAccountStore::default());
+        store
+            .seed_api_key(
+                "acct_provider_contract",
+                format!("{}/by-client/v1", upstream.uri()),
+                provider_openai::credential::ResponsesTransport::Http,
+            )
+            .await;
+        store.set_forward_client_identity("acct_provider_contract", enabled);
+        Mock::given(method("POST"))
+            .and(path("/by-client/v1/responses"))
+            .and(header("authorization", "Bearer sk-api-test-only"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(CAPTURE_COMPLETED_SSE, "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let (provider, _) = provider_and_quota_with_affinity_and_base_url_and_leases(
+            &store,
+            Arc::new(MemorySessionAffinity::default()),
+            upstream.uri(),
+            Arc::new(TestLeaseCoordinator::default()),
+            DEFAULT_STREAM_MAX_RETRIES as u32,
+        );
+        let attempt = context("req_client_identity", CancellationToken::new());
+        let expected = attempt.client_api_key_ref().as_str().to_owned();
+        let mut stream = provider
+            .execute(
+                planned_request("openai", generate_with_downstream_headers()),
+                attempt,
+            )
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+        let requests = upstream.received_requests().await.unwrap();
+        let sent = requests.iter().find(|r| r.method == "POST").unwrap();
+        assert_eq!(
+            sent.headers
+                .get("x-cpr-client-id")
+                .map(|v| v.to_str().unwrap()),
+            enabled.then_some(expected.as_str())
+        );
+        upstream.verify().await;
     }
 }

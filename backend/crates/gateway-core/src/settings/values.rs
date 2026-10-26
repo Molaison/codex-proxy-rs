@@ -22,6 +22,7 @@ pub struct SettingsValues {
     pub(crate) max_account_rotations: u32,
     pub(crate) openai_session_affinity_ttl_hours: u32,
     pub(crate) responses_max_decompressed_body_bytes: u64,
+    pub(crate) request_interval_ms: u64,
     pub(crate) smart_scheduling: crate::account::SmartSchedulingConfig,
     pub(crate) rotation_strategy: String,
     pub(crate) model_mappings: Arc<BTreeMap<String, String>>,
@@ -128,6 +129,7 @@ impl SettingsValues {
     #[must_use]
     pub fn new(
         max_concurrent_per_account: u32,
+        request_interval_ms: u64,
         rotation_strategy: impl Into<String>,
         model_mappings: BTreeMap<String, String>,
         min_codex_desktop_version: Option<String>,
@@ -148,6 +150,7 @@ impl SettingsValues {
             max_account_rotations: 3,
             openai_session_affinity_ttl_hours: 24,
             responses_max_decompressed_body_bytes: 64 * 1024 * 1024,
+            request_interval_ms,
             smart_scheduling: crate::account::SmartSchedulingConfig::default(),
             rotation_strategy: rotation_strategy.into(),
             model_mappings: Arc::new(model_mappings),
@@ -185,7 +188,7 @@ pub fn validate_request_limits(
         (max_waiting_per_key <= 1_000, "max_waiting_per_key"),
         (max_waiting_per_account <= 1_000, "max_waiting_per_account"),
         (
-            (1..=120).contains(&timeout_seconds),
+            (1..=3_600).contains(&timeout_seconds),
             "concurrency_wait_timeout_seconds",
         ),
         (
